@@ -3,10 +3,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/helzeiah/lockin/main/install.sh | bash
 set -euo pipefail
 
+TMP_DIR=""
+cleanup() { [[ -n "$TMP_DIR" ]] && rm -rf "$TMP_DIR"; return 0; }
+trap cleanup EXIT
+
 main() {
   local repo="helzeiah/lockin" dest="$HOME/Applications"
-  local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  TMP_DIR="$(mktemp -d)"
+  local tmp="$TMP_DIR"
 
   [[ "$(uname)" == "Darwin" ]] || { echo "lockin is a macOS app."; exit 1; }
   local major; major="$(sw_vers -productVersion | cut -d. -f1)"
@@ -26,7 +30,7 @@ main() {
   mv "$tmp/lockin.app" "$dest/"
   xattr -dr com.apple.quarantine "$dest/lockin.app" 2>/dev/null || true
   # The app used to be called Focus. Settings and history carry over on first launch.
-  [[ -d "$dest/Focus.app" ]] && rm -rf "$dest/Focus.app"
+  if [[ -d "$dest/Focus.app" ]]; then rm -rf "$dest/Focus.app"; fi
 
   open "$dest/lockin.app"
   echo "Installed to $dest/lockin.app. Look for the target icon in the menu bar."
