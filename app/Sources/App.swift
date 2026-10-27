@@ -83,9 +83,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // Close the menu-bar popover (it's the key window while open).
+// Only the dropdown: the icon itself lives in a menu-bar-height status window (NSStatusBarWindow on macOS 15), and
+// ordering that out makes the icon vanish until relaunch.
 @MainActor func closePopover() {
-    for w in NSApp.windows where w.className.contains("MenuBarExtra") || w.className.contains("StatusBarWindow") { w.orderOut(nil) }
-    if let k = NSApp.keyWindow, k.className.contains("MenuBarExtra") { k.orderOut(nil) }
+    for w in NSApp.windows where !isStatusItemWindow(w) && (w.className.contains("MenuBarExtra") || w.className.contains("StatusBarWindow")) {
+        w.orderOut(nil)
+    }
+}
+@MainActor func isStatusItemWindow(_ w: NSWindow) -> Bool {
+    w.className.contains("StatusBarWindow") && w.frame.height <= 44
+}
+/// Where the menu-bar icon is on screen, if macOS is showing it.
+@MainActor func statusItemFrame() -> NSRect? {
+    NSApp.windows.first { isStatusItemWindow($0) && $0.isVisible }?.frame
 }
 
 // The menu-bar popover.

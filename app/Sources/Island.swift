@@ -32,6 +32,8 @@ final class IslandPanel: NSPanel {
 final class IslandGeo: ObservableObject {
     static let shared = IslandGeo()
     @Published var geo = TopGeo.current()
+    /// The menu-bar icon sits right of the notch where the time would go (a crowded bar), so draw the time on the left.
+    @Published var timeOnLeft = false
 }
 
 @MainActor
@@ -54,7 +56,10 @@ final class IslandController {
         host.sizingOptions = []   // don't let SwiftUI shrink the window to its content; we keep it centered
         panel.contentView = host
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in   // follow you to the other screen
-            Task { @MainActor in if TopGeo.activeScreen() != IslandGeo.shared.geo.screen { IslandController.shared.position() } }
+            Task { @MainActor in
+                if TopGeo.activeScreen() != IslandGeo.shared.geo.screen { IslandController.shared.position() }
+                else { IslandController.shared.avoidStatusItem() }
+            }
         }
         position()
         let e = Engine.shared
@@ -73,6 +78,17 @@ final class IslandController {
         IslandGeo.shared.geo = g
         panel.setFrame(NSRect(x: g.screen.frame.midX - size.width / 2, y: g.screen.frame.maxY - size.height,
                               width: size.width, height: size.height), display: true)
+        avoidStatusItem()
+    }
+
+    /// Keep the right wing off our own menu-bar icon (the icon nearest the notch on a full menu bar).
+    func avoidStatusItem() {
+        let g = IslandGeo.shared.geo
+        guard g.notch, let icon = statusItemFrame() else { IslandGeo.shared.timeOnLeft = false; return }
+        let rightWing = NSRect(x: g.screen.frame.midX + g.notchWidth / 2, y: g.screen.frame.maxY - g.barHeight,
+                               width: IslandView.wingMax + 16, height: g.barHeight)
+        let left = icon.intersects(rightWing)
+        if IslandGeo.shared.timeOnLeft != left { IslandGeo.shared.timeOnLeft = left }
     }
 
     private func setVisible(_ v: Bool) {
@@ -108,12 +124,10 @@ struct IslandView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Group {
-                if let c = e.card { expanded(c) } else if e.block != nil { compact }
+            if let c = e.card { pill(expanded(c), radius: 24) }
+            else if e.block != nil {
+                if geo.notch && g.timeOnLeft { compactLeft } else { pill(compact, radius: geo.notch ? 10 : 12) }
             }
-            .background(IslandShape(radius: e.card != nil ? 24 : (geo.notch ? 10 : 12)).fill(Color.black))
-            .clipShape(IslandShape(radius: e.card != nil ? 24 : (geo.notch ? 10 : 12)))
-            .contentShape(Rectangle())
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -123,9 +137,38 @@ struct IslandView: View {
         .animation(spring, value: e.block?.started)
     }
 
+    static let wingMax: CGFloat = 64
+
+    private func pill<V: View>(_ v: V, radius: CGFloat) -> some View {
+        v.background(IslandShape(radius: radius).fill(Color.black))
+            .clipShape(IslandShape(radius: radius))
+            .contentShape(Rectangle())
+    }
+
+    private var timeText: some View {
+        Text(fmtTime(e.remaining)).font(.system(size: 12.5, weight: .semibold, design: .rounded)).monospacedDigit()
+            .foregroundStyle(e.drifting ? tintColor("red") : .white)
+    }
+
+    // Crowded menu bar: ring and time both on the left wing, nothing drawn to the right of the notch,
+    // so the menu-bar icons there stay visible and clickable. The clear spacer keeps the notch gap centered.
+    private var compactLeft: some View {
+        HStack(spacing: 0) {
+            pill(HStack(spacing: 0) {
+                HStack(spacing: 7) { Ring(progress: e.progress, color: ringColor, size: 14); timeText; Spacer(minLength: 0) }
+                    .padding(.leading, 13).frame(width: 2 * IslandView.wingMax + 12)
+                Color.clear.frame(width: geo.notchWidth)
+            }
+            .frame(height: geo.barHeight)
+            .onHover { hover = $0 }
+            .onTapGesture { e.tapIsland() }, radius: 10)
+            Color.clear.frame(width: 2 * IslandView.wingMax + 12, height: geo.barHeight).allowsHitTesting(false)
+        }
+    }
+
     // Minimal: ring on the left wing, time on the right wing, the notch untouched in between.
     @ViewBuilder private var compact: some View {
-        let wing: CGFloat = hover ? 64 : 50
+        let wing: CGFloat = hover ? IslandView.wingMax : 50
         Group {
             if geo.notch {
                 HStack(spacing: 0) {
