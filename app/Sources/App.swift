@@ -39,7 +39,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // A menu-bar app keeps running when its windows close. Some macOS versions (Sequoia) otherwise quit it, or let
+    // automatic termination reclaim it once no window is open, and the menu-bar icon vanishes with it.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // Opening Focus.app again while it's running shows the day plan instead of doing nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        Task { @MainActor in Planner.shared.open() }
+        return false
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
+        ProcessInfo.processInfo.disableAutomaticTermination("Focus runs in the menu bar")
+        ProcessInfo.processInfo.disableSuddenTermination()
         Task { @MainActor in
             Engine.shared.start()
             IslandController.shared.start()

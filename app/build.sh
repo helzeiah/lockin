@@ -53,6 +53,8 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleVersion</key><string>$VERSION</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_OS</string>
 <key>LSUIElement</key><true/>
+<key>NSSupportsAutomaticTermination</key><false/>
+<key>NSSupportsSuddenTermination</key><false/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Focus</string><key>CFBundleURLSchemes</key><array><string>focus</string></array></dict></array>
 <key>NSAppleEventsUsageDescription</key><string>Focus checks which tab is open in your browser and terminal so it can tell when you drift.</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Focus reads today's events so it can plan around them.</string>
