@@ -1,0 +1,175 @@
+{
+  "_help": "Edit in Settings (menu bar > Settings). Matching is case-insensitive and by substring on the app name, the browser tab's URL/title, or the Claude Code project folder.",
+  "ai": {
+    "provider": "none",
+    "model": "",
+    "base_url": ""
+  },
+  "about_me": "",
+  "drift_seconds": 30,
+  "renudge_seconds": 120,
+  "break_minutes": 5,
+  "away_seconds": 45,
+  "mac_away_seconds": 180,
+  "morning_hour": 6,
+  "recap_at": "21:00",
+  "day_end": "23:00",
+  "idle_nudge_minutes": 40,
+  "active_hours": [
+    8,
+    23
+  ],
+  "always_ok_apps": [
+    "Finder",
+    "System Settings",
+    "Calendar",
+    "Reminders",
+    "Spotify",
+    "Music",
+    "loginwindow",
+    "Activity Monitor",
+    "1Password",
+    "Passwords",
+    "Preview"
+  ],
+  "block_sites": [
+    "youtube.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "instagram.com",
+    "tiktok.com",
+    "netflix.com",
+    "twitch.tv",
+    "roblox.com",
+    "hulu.com"
+  ],
+  "distractions": {
+    "apps": [
+      "Roblox",
+      "RobloxPlayer",
+      "Steam",
+      "Discord",
+      "TV",
+      "Music Video"
+    ],
+    "sites": [
+      "youtube.com",
+      "reddit.com",
+      "x.com",
+      "twitter.com",
+      "instagram.com",
+      "tiktok.com",
+      "netflix.com",
+      "twitch.tv",
+      "espn.com",
+      "chess.com",
+      "pokerstars",
+      "ggpoker",
+      "roblox.com",
+      "hulu.com",
+      "max.com",
+      "primevideo",
+      "9gag",
+      "facebook.com"
+    ]
+  },
+  "blocks": [
+    {
+      "name": "Deep work",
+      "minutes": 50,
+      "apps": [
+        "Code",
+        "Visual Studio Code",
+        "Xcode",
+        "Cursor",
+        "IntelliJ IDEA",
+        "PyCharm"
+      ],
+      "sites": [
+        "github.com",
+        "stackoverflow.com",
+        "developer.apple.com",
+        "docs.python.org",
+        "localhost"
+      ],
+      "projects": [],
+      "terminal_ok": true
+    },
+    {
+      "name": "Study",
+      "minutes": 45,
+      "apps": [
+        "Preview",
+        "Notes",
+        "GoodNotes",
+        "Notion"
+      ],
+      "sites": [
+        "canvas",
+        "notion.so",
+        "docs.google.com",
+        "khanacademy",
+        "wikipedia.org",
+        "chatgpt.com",
+        "claude.ai"
+      ],
+      "projects": [],
+      "offline_ok": true,
+      "terminal_ok": false
+    },
+    {
+      "name": "Coding practice",
+      "minutes": 45,
+      "apps": [
+        "Code",
+        "Visual Studio Code",
+        "CLion"
+      ],
+      "sites": [
+        "leetcode.com",
+        "neetcode.io",
+        "hackerrank",
+        "codesignal",
+        "cppreference"
+      ],
+      "projects": [],
+      "terminal_ok": true
+    },
+    {
+      "name": "Writing",
+      "minutes": 45,
+      "apps": [
+        "Pages",
+        "Microsoft Word",
+        "Notion",
+        "Obsidian"
+      ],
+      "sites": [
+        "docs.google.com",
+        "overleaf.com",
+        "notion.so",
+        "grammarly"
+      ],
+      "projects": [],
+      "terminal_ok": false
+    },
+    {
+      "name": "Admin / email",
+      "minutes": 25,
+      "apps": [
+        "Mail",
+        "Microsoft Outlook",
+        "Slack",
+        "Calendar"
+      ],
+      "sites": [
+        "mail.google.com",
+        "outlook",
+        "calendar.google.com"
+      ],
+      "projects": [],
+      "terminal_ok": false
+    }
+  ]
+}

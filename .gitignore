@@ -1,0 +1,17 @@
+# personal data (the app keeps its own copy in ~/Library/Application Support/Focus)
+config.json
+todos.json
+todos.prev.json
+state.json
+log.jsonl
+
+# build output
+dist/
+bin/calevents
+__pycache__/
+.DS_Store
+
+# old Hammerspoon prototype
+island.html
+planner.html
+blocker.html

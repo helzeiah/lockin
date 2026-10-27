@@ -1,0 +1,21 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal app
+        run: VERSION="${GITHUB_REF_NAME#v}" ./app/build.sh --release
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Focus.zip
+          generate_release_notes: true
