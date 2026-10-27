@@ -13,7 +13,7 @@ final class SettingsWindow {
         if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        w.title = "Focus Settings"
+        w.title = "lockin Settings"
         w.isReleasedWhenClosed = false
         w.minSize = NSSize(width: 560, height: 460)
         w.contentView = NSHostingView(rootView: SettingsView(model: SettingsModel()))
@@ -193,7 +193,7 @@ struct GeneralTab: View {
                     Text("Quick focus only").tag("quick")
                     Text("My blocks only").tag("blocks")
                 }
-                Toggle("Open Focus when I log in", isOn: Binding(
+                Toggle("Open lockin when I log in", isOn: Binding(
                     get: { SMAppService.mainApp.status == .enabled },
                     set: { on in try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister(); m.objectWillChange.send() }))
             }
@@ -312,7 +312,7 @@ struct AITab: View {
                 }
             } footer: {
                 Text(m.aiProvider.isEmpty
-                     ? "Everything works without AI: add blocks in Plan my day and Focus suggests the soonest open time."
+                     ? "Everything works without AI: add blocks in Plan my day and lockin suggests the soonest open time."
                      : "The AI turns a messy brain dump into a timed plan and edits it when you say things like \"free at 8 now\". It sees your to-dos, today's calendar and the text you type. Nothing else.")
             }
             if !m.aiProvider.isEmpty {

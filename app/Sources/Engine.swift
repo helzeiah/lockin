@@ -36,7 +36,7 @@ final class Engine: ObservableObject {
     @Published var planning = false
     @Published var planError: String?
     @Published var blocked: Blocked? = nil
-    /// The app you were last in, other than Focus itself (the menu's popover makes Focus the front app).
+    /// The app you were last in, other than lockin itself (the menu's popover makes lockin the front app).
     @Published var lastExternalApp = ""
 
     private var timers: [Timer] = []
@@ -79,10 +79,10 @@ final class Engine: ObservableObject {
             Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in Task { @MainActor in self.minute() } },
         ]
         let nc = NSWorkspace.shared.notificationCenter
-        lastExternalApp = Detect.frontApp() == "Focus" ? "" : Detect.frontApp()
+        lastExternalApp = Detect.frontApp() == selfAppName ? "" : Detect.frontApp()
         nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { n in
             let name = (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.localizedName ?? ""
-            Task { @MainActor in if !name.isEmpty, name != "Focus" { self.lastExternalApp = name } }
+            Task { @MainActor in if !name.isEmpty, name != selfAppName { self.lastExternalApp = name } }
         }
         for n in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             nc.addObserver(forName: n, object: nil, queue: .main) { _ in
@@ -158,7 +158,7 @@ final class Engine: ObservableObject {
     /// A block with no name: just a length and the apps you'll use. Everything else gets covered.
     func startQuick(minutes: Int, apps: [String]) {
         UserDefaults.standard.set(apps, forKey: "quickApps")
-        startBlock(Preset(name: "Focus", minutes: minutes), minutes: minutes, task: apps.isEmpty ? nil : apps.joined(separator: ", "), apps: apps)
+        startBlock(Preset(name: "Quick focus", minutes: minutes), minutes: minutes, task: apps.isEmpty ? nil : apps.joined(separator: ", "), apps: apps)
         if let first = apps.first { lastOnTask = (first, "") }
     }
     var quickApps: [String] { UserDefaults.standard.stringArray(forKey: "quickApps") ?? [] }
@@ -318,9 +318,9 @@ final class Engine: ObservableObject {
     }
 
     /// In a strict block, is the front app/page outside the allowed list? A browser you picked is fine on any page
-    /// that isn't a distraction; Focus's own windows and always-fine apps never count.
+    /// that isn't a distraction; lockin's own windows and always-fine apps never count.
     private func strictViolation(_ c: FrontContext, _ p: Preset, _ state: String) -> Bool {
-        guard p.strict == true, state != "on", !c.app.isEmpty, c.app != "Focus",
+        guard p.strict == true, state != "on", !c.app.isEmpty, c.app != selfAppName,
               anyIn(c.app, cfg.always_ok_apps) == nil else { return false }
         if Detect.browsers[c.app] != nil, state == "neutral", anyIn(c.app, p.apps) != nil { return false }
         return true

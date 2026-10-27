@@ -1,19 +1,26 @@
+import AppKit
 import Foundation
 import Security
 
-// Data lives in ~/Library/Application Support/Focus (the same files the Python helper reads and writes).
+/// The app's own name as macOS reports it, so its windows never count as another app.
+let selfAppName = NSRunningApplication.current.localizedName ?? ProcessInfo.processInfo.processName
+
+// Data lives in ~/Library/Application Support/lockin (the same files the Python helper reads and writes).
 // The helper scripts and the calendar reader ship inside the app bundle (Contents/Resources).
 enum Paths {
     static let dir: URL = {
         let fm = FileManager.default
-        let d = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Focus")
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let d = support.appendingPathComponent("lockin")
         try? fm.createDirectory(at: d, withIntermediateDirectories: true)
         if !fm.fileExists(atPath: d.appendingPathComponent("config.json").path) {
-            // First launch: bring over data from the old ~/projects/focus-coach layout, else start from the example config.
-            let legacy = fm.homeDirectoryForCurrentUser.appendingPathComponent("projects/focus-coach")
-            if fm.fileExists(atPath: legacy.appendingPathComponent("config.json").path) {
+            // First launch: copy data from an older install (the app used to be called Focus), else start from the
+            // example config. The old folder is left in place.
+            let legacy = [support.appendingPathComponent("Focus"),
+                          fm.homeDirectoryForCurrentUser.appendingPathComponent("projects/focus-coach")]
+            if let old = legacy.first(where: { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }) {
                 for f in ["config.json", "todos.json", "state.json", "log.jsonl"] {
-                    try? fm.copyItem(at: legacy.appendingPathComponent(f), to: d.appendingPathComponent(f))
+                    try? fm.copyItem(at: old.appendingPathComponent(f), to: d.appendingPathComponent(f))
                 }
             } else {
                 try? fm.copyItem(at: resources.appendingPathComponent("config.example.json"), to: d.appendingPathComponent("config.json"))
@@ -33,7 +40,7 @@ enum Paths {
 
 // The AI API key, kept in the login Keychain rather than in config.json.
 enum Keychain {
-    private static let service = "Focus AI API key"
+    private static let service = "lockin AI API key"
     private static let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                              kSecAttrService as String: service, kSecAttrAccount as String: "default"]
     static func get() -> String? {

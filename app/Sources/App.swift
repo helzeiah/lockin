@@ -17,7 +17,7 @@ struct FocusApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    // focus://start?block=Study&minutes=25&task=...  focus://stop  focus://plan  focus://today  focus://recap
+    // lockin://start?block=Study&minutes=25&task=...  lockin://stop  lockin://plan  lockin://today  lockin://recap
     func application(_ app: NSApplication, open urls: [URL]) {
         Task { @MainActor in
             let e = Engine.shared
@@ -43,14 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // automatic termination reclaim it once no window is open, and the menu-bar icon vanishes with it.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    // Opening Focus.app again while it's running shows the day plan instead of doing nothing.
+    // Opening lockin.app again while it's running shows the day plan instead of doing nothing.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         Task { @MainActor in Planner.shared.open() }
         return false
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        ProcessInfo.processInfo.disableAutomaticTermination("Focus runs in the menu bar")
+        ProcessInfo.processInfo.disableAutomaticTermination("lockin runs in the menu bar")
         ProcessInfo.processInfo.disableSuddenTermination()
         Task { @MainActor in
             Engine.shared.start()
@@ -107,7 +107,7 @@ struct MenuContent: View {
                 menuRow("Today's plan", "sun.max") { e.showPlan() }
                 menuRow("How today's going", "chart.bar") { e.showRecap() }
                 menuRow("Settings…", "gearshape") { SettingsWindow.shared.open() }
-                menuRow("Quit Focus", "power") { NSApp.terminate(nil) }
+                menuRow("Quit lockin", "power") { NSApp.terminate(nil) }
             }
             .padding(6)
         }
@@ -180,7 +180,7 @@ struct QuickFocus: View {
 
     private var running: [String] {
         let names = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }.compactMap(\.localizedName).filter { $0 != "Focus" }
+            .filter { $0.activationPolicy == .regular }.compactMap(\.localizedName).filter { $0 != selfAppName }
         return Array(Set(names + apps)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 

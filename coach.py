@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Helper for the Focus app: morning plan text, nightly recap, open time slots, and the AI day planner.
+"""Helper for the lockin app: morning plan text, nightly recap, open time slots, and the AI day planner.
     coach.py plan         -> today's suggested focus: classes, to-dos, deadlines
     coach.py recap        -> today's focus stats from log.jsonl
     coach.py slot MINUTES -> the soonest start (HH:MM) that fits around the calendar and what's already planned (no AI)
     coach.py todos        -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI creates/edits todos.json
     coach.py test         -> checks the AI set up in Settings > AI planner
-Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/Focus), else next to this file.
+Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 """
 import datetime as dt
 import json

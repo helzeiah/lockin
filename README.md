@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="Focus icon"></p>
+<p align="center"><img src="docs/icon.png" width="128" alt="lockin icon"></p>
 
 # lockin
 
@@ -31,7 +31,7 @@ counts that as drifting too, unless you said you'd be working on paper.
 - **Quick focus.** Pick a length and the apps you'll use. Anything else you
   open gets covered until the timer ends. No setup needed.
 - **Knows when you drift.** Each focus block lists the apps, sites and project
-  folders that count as on task. Focus checks the front app, the open browser
+  folders that count as on task. lockin checks the front app, the open browser
   tab, and even which folder your terminal's Claude Code session is in. After
   30 seconds off task it nudges you; after a few minutes away from the Mac it
   counts that too (or doesn't, for blocks marked "offline is fine").
@@ -39,7 +39,7 @@ counts that as drifting too, unless you said you'd be working on paper.
   cover with *Back to work*, *Close tab* or *Give me 5 min*. The tab stays
   open so you don't lose your place. Turn on **Only allow these apps and
   sites** for a block and *everything* outside its list gets covered.
-- **Plans your day, by hand or with AI.** Add blocks yourself and Focus fills in
+- **Plans your day, by hand or with AI.** Add blocks yourself and lockin fills in
   the **soonest open time**, working around your calendar and what's already
   planned. Or type a messy brain dump ("stats hw, gym at 6, finish the essay
   intro") and the AI planner turns it into a timed schedule, then edits it as
@@ -48,8 +48,8 @@ counts that as drifting too, unless you said you'd be working on paper.
   gentle "up next" when no timer is running, and an evening recap of focused
   time, finished blocks and your biggest distractions. Unfinished to-dos roll
   into a "from earlier" list instead of nagging you.
-- **Scriptable.** `focus://start?block=Study&minutes=25`, `focus://next`,
-  `focus://stop` and friends work from Shortcuts, Raycast or a terminal.
+- **Scriptable.** `lockin://start?block=Study&minutes=25`, `lockin://next`,
+  `lockin://stop` and friends work from Shortcuts, Raycast or a terminal.
 
 <br>
 
@@ -69,8 +69,8 @@ counts that as drifting too, unless you said you'd be working on paper.
 curl -fsSL https://raw.githubusercontent.com/helzeiah/lockin/main/install.sh | bash
 ```
 
-That puts `Focus.app` in `~/Applications` and opens it. A target icon appears
-in the menu bar. You can also grab `Focus.zip` from the
+That puts `lockin.app` in `~/Applications` and opens it. A target icon appears
+in the menu bar. You can also grab `lockin.zip` from the
 [latest release](https://github.com/helzeiah/lockin/releases/latest), unzip it,
 and drag the app into Applications. The first time, right-click it and choose
 **Open** (the app isn't notarized, so macOS asks once).
@@ -160,7 +160,7 @@ re-nudged on an interval. The AI planner asks for JSON that matches a schema
 for servers that don't support schemas), so the reply always drops straight
 into the plan.
 
-Your data stays in `~/Library/Application Support/Focus`: `config.json`
+Your data stays in `~/Library/Application Support/lockin`: `config.json`
 (settings), `todos.json` (today's plan and backlog), `log.jsonl` (focus history
 for the recap) and `state.json` (the running block, so a restart doesn't lose
 it).
@@ -171,27 +171,27 @@ it).
 
 ```bash
 ./app/build.sh             # build for this Mac, install to ~/Applications, restart it
-./app/build.sh --release   # universal build + dist/Focus.zip
+./app/build.sh --release   # universal build + dist/lockin.zip
 swift app/make-icon.swift  # redraw the app icon
 ```
 
-Pushing a `v*` tag builds a universal release and attaches `Focus.zip` to a
+Pushing a `v*` tag builds a universal release and attaches `lockin.zip` to a
 GitHub release (`.github/workflows/release.yml`).
 
 **Tip:** macOS ties permissions to the app's signature, and the default ad-hoc
 signature changes on every build, so you'd re-approve Calendar/Automation each
 time. Make a free local signing certificate once: *Keychain Access → Certificate
-Assistant → Create a Certificate…*, name it `Focus Local Signing`, type *Code
+Assistant → Create a Certificate…*, name it `lockin Local Signing`, type *Code
 Signing*. `build.sh` uses it automatically.
 
 <br>
 
 ## Uninstall
 
-Quit Focus from its menu, then:
+Quit lockin from its menu, then:
 
 ```bash
-rm -rf ~/Applications/Focus.app ~/Library/Application\ Support/Focus
+rm -rf ~/Applications/lockin.app ~/Library/Application\ Support/lockin
 ```
 
 <br>
