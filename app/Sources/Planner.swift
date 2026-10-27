@@ -1,17 +1,17 @@
 import AppKit
 import SwiftUI
 
-// "Plan my day": a timeline of today's focus blocks you edit by talking to Claude.
+// "Plan my day": today's focus blocks on a timeline, added by hand or by talking to the AI planner.
 @MainActor
 final class Planner {
     static let shared = Planner()
-    private var window: NSWindow?
+    private var window: KeyPanel?
 
     func open() {
         Engine.shared.card = nil      // one thing at a time
         Engine.shared.reloadTodos()
-        if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 720),
+        if let w = window { w.show(); return }
+        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 600, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
@@ -21,9 +21,25 @@ final class Planner {
         w.contentView = NSHostingView(rootView: PlannerView().environmentObject(Engine.shared))
         w.center()
         window = w
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        w.show()
     }
+}
+
+/// A regular-looking window that never activates the app. Activating an accessory app swaps the menu bar to its
+/// own menus, and on a notched Mac with a full menu bar macOS then hides status items, the lockin icon included.
+/// It still becomes key, so text fields, popovers and keyboard shortcuts work.
+final class KeyPanel: NSPanel {
+    override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: styleMask.union(.nonactivatingPanel), backing: backing, defer: flag)
+        becomesKeyOnlyIfNeeded = false
+        hidesOnDeactivate = false
+        isFloatingPanel = false
+        level = .normal
+        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+    }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+    func show() { orderFrontRegardless(); makeKey() }
 }
 
 struct PlannerView: View {
@@ -51,6 +67,41 @@ struct PlannerView: View {
     }
 
     private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            controls
+            titleRow
+        }
+        .padding(.horizontal, 28).padding(.top, 8).padding(.bottom, 16)
+    }
+
+    // The menu bar's core controls, in case macOS hides the icon on a crowded menu bar.
+    private var controls: some View {
+        HStack(spacing: 14) {
+            Spacer()
+            Menu {
+                let quick = e.quickApps.isEmpty ? (e.lastExternalApp.isEmpty ? [] : [e.lastExternalApp]) : e.quickApps
+                Section(quick.isEmpty ? "Quick focus" : "Quick focus: \(quick.joined(separator: ", "))") {
+                    ForEach([25, 45, 60, 90], id: \.self) { m in
+                        Button("\(m) min") { e.startQuick(minutes: m, apps: quick); NSApp.keyWindow?.close() }.disabled(quick.isEmpty)
+                    }
+                }
+                if !e.cfg.blocks.isEmpty {
+                    Section("My blocks") {
+                        ForEach(e.cfg.blocks) { p in
+                            Button("\(p.name) · \(p.minutes) min") { e.startBlock(p); NSApp.keyWindow?.close() }
+                        }
+                    }
+                }
+            } label: { Label("Start a block", systemImage: "timer") }
+                .menuStyle(.borderlessButton).fixedSize()
+            Button { SettingsWindow.shared.open() } label: { Image(systemName: "gearshape") }.help("Settings")
+            Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }.help("Quit lockin")
+        }
+        .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(.secondary)
+        .frame(height: 22)
+    }
+
+    private var titleRow: some View {
         HStack(alignment: .lastTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(dateLine).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
@@ -59,7 +110,6 @@ struct PlannerView: View {
             Spacer()
             if hasPlan { summary }
         }
-        .padding(.horizontal, 28).padding(.top, 40).padding(.bottom, 16)
     }
 
     private var summary: some View {

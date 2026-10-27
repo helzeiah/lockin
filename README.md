@@ -97,6 +97,11 @@ macOS asks for these the first time they're needed:
 Both are optional. Without them, drift detection falls back to app names, and
 planning ignores your calendar.
 
+**Don't see the icon?** On notched Macs with a crowded menu bar, macOS hides
+icons that don't fit. Hold ⌘ and drag other icons out of the way, or open
+`lockin.app` again to get the planner, which has the same controls (start a
+block, settings, quit).
+
 <br>
 
 ## The AI planner (optional)

@@ -52,12 +52,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("lockin runs in the menu bar")
         ProcessInfo.processInfo.disableSuddenTermination()
+        // SwiftUI installs a full File/Edit/View/Window/Help menu; set ours after it's done.
+        DispatchQueue.main.async { NSApp.mainMenu = minimalMainMenu() }
         Task { @MainActor in
             Engine.shared.start()
             IslandController.shared.start()
             BlockerController.shared.start()
         }
     }
+}
+
+/// Just enough menu for the windows: an app menu (close, quit) and Edit, so ⌘C/⌘V/⌘A/⌘Z work in text fields.
+/// The windows don't activate the app, so this only shows if something else does.
+@MainActor func minimalMainMenu() -> NSMenu {
+    let main = NSMenu()
+    func submenu(_ title: String, _ items: [NSMenuItem]) {
+        let m = NSMenu(title: title); items.forEach(m.addItem)
+        let holder = NSMenuItem(title: title, action: nil, keyEquivalent: ""); holder.submenu = m
+        main.addItem(holder)
+    }
+    func item(_ t: String, _ a: Selector, _ k: String, _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+        let i = NSMenuItem(title: t, action: a, keyEquivalent: k); i.keyEquivalentModifierMask = mods; return i
+    }
+    submenu(selfAppName, [item("Close Window", #selector(NSWindow.performClose(_:)), "w"), .separator(),
+                          item("Quit \(selfAppName)", #selector(NSApplication.terminate(_:)), "q")])
+    submenu("Edit", [item("Undo", Selector(("undo:")), "z"), item("Redo", Selector(("redo:")), "z", [.command, .shift]), .separator(),
+                     item("Cut", #selector(NSText.cut(_:)), "x"), item("Copy", #selector(NSText.copy(_:)), "c"),
+                     item("Paste", #selector(NSText.paste(_:)), "v"), item("Select All", #selector(NSText.selectAll(_:)), "a")])
+    return main
 }
 
 // Close the menu-bar popover (it's the key window while open).

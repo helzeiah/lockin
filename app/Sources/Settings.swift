@@ -6,12 +6,12 @@ import SwiftUI
 @MainActor
 final class SettingsWindow {
     static let shared = SettingsWindow()
-    private var window: NSWindow?
+    private var window: KeyPanel?
 
     func open() {
         Engine.shared.card = nil
-        if let w = window { w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
+        if let w = window { w.show(); return }
+        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "lockin Settings"
         w.isReleasedWhenClosed = false
@@ -19,8 +19,7 @@ final class SettingsWindow {
         w.contentView = NSHostingView(rootView: SettingsView(model: SettingsModel()))
         w.center()
         window = w
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        w.show()
     }
 }
 
