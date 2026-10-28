@@ -35,15 +35,20 @@ counts that as drifting too, unless you said you'd be working on paper.
   tab, and even which folder your terminal's Claude Code session is in. After
   30 seconds off task it nudges you; after a few minutes away from the Mac it
   counts that too (or doesn't, for blocks marked "offline is fine").
-- **Covers distractions.** During a block, YouTube/Reddit/etc. get a blurred
-  cover with *Back to work*, *Close tab* or *Give me 5 min*. The tab stays
-  open so you don't lose your place. Turn on **Only allow these apps and
-  sites** for a block and *everything* outside its list gets covered.
+- **Covers distractions.** During a focus block, YouTube/Reddit/etc. and
+  distracting apps (Discord, Steam...) get a blurred cover with *Back to work*,
+  *Close tab* or *Hide app*, and *Give me 5 min*. The tab stays open and the app
+  keeps running, so you don't lose your place. Like ScreenZen, the 5-minute pass
+  only unlocks after a 10-second countdown and runs out after two per block (or
+  never shows, on **Hard**). Turn on **Only allow these apps and sites** for a
+  block and *everything* outside its list gets covered. Breaks are never covered.
 - **Plans your day, by hand or with AI.** Add blocks yourself and lockin fills in
   the **soonest open time**, working around your calendar and what's already
   planned. Or type a messy brain dump ("stats hw, gym at 6, finish the essay
   intro") and the AI planner turns it into a timed schedule, then edits it as
-  you go ("free at 8 now", "finished the stats hw").
+  you go ("free at 8 now", "finished the stats hw"). Click any to-do to change
+  its name, block, length or start time yourself. Stop a block early and
+  the next start picks up with only the time that's left.
 - **Keeps the day moving.** A morning plan the first time you sit down, a
   gentle "up next" when no timer is running, and an evening recap of focused
   time, finished blocks and your biggest distractions. Unfinished to-dos roll
@@ -138,7 +143,19 @@ Open **Settings → Focus blocks**. Each block has:
 blocks, or both.
 
 **Distractions** sets the sites that get covered, the apps and sites that count
-as drifting, and the apps that are always fine (Spotify, Finder...).
+as drifting, and the apps that are always fine (Spotify, Finder...). Its
+**Blocking** setting decides what happens to distracting apps during a focus
+block:
+
+| Blocking | Distracting apps | *Give me 5 min* |
+|---|---|---|
+| **Nudge only** | a nudge in the notch | any time, as often as you like |
+| **Cover** (default) | covered, like distracting sites | after a 10 s countdown, twice per block |
+| **Hard** | covered | never |
+
+**Play a sound when something gets covered** (on by default) plays a soft
+system sound, at most every 30 seconds. lockin itself, macOS's own UI and your
+always-fine apps are never covered.
 
 <br>
 
@@ -149,7 +166,7 @@ app/Sources/          SwiftUI menu-bar app (no Xcode project, built with swiftc)
   Engine.swift          the timer, drift detection loop, nudges, plan/recap cards
   Detect.swift          front app, browser tab (AppleScript), terminal folder, idle time
   Island.swift          the notch pill: reads notch geometry, follows the active screen
-  Blocker.swift         the blurred cover over distracting tabs
+  Blocker.swift         the blurred cover over distracting tabs and apps
   Planner.swift         the "Plan my day" window: timeline, manual add, AI chat
   Settings.swift        settings window
 coach.py              helper: morning plan, recap, soonest-slot finder, AI planner

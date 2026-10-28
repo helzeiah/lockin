@@ -40,6 +40,8 @@ final class SettingsModel: ObservableObject {
     @Published var alwaysOkApps: [String]
     @Published var blocks: [Preset]
     @Published var menuStyle: String
+    @Published var blocking: String
+    @Published var coverSound: Bool
     @Published var aiProvider: String
     @Published var aiModel: String
     @Published var aiBaseURL: String
@@ -71,6 +73,8 @@ final class SettingsModel: ObservableObject {
         alwaysOkApps = c.always_ok_apps ?? []
         blocks = c.blocks
         menuStyle = c.menu_style ?? "both"
+        blocking = c.blocking ?? "cover"
+        coverSound = c.cover_sound ?? true
         let ai = raw["ai"] as? [String: Any] ?? [:]
         aiProvider = (ai["provider"] as? String).map { $0 == "none" ? "" : $0 } ?? ""
         aiModel = ai["model"] as? String ?? ""
@@ -123,6 +127,8 @@ final class SettingsModel: ObservableObject {
         raw["block_sites"] = blockSites
         raw["always_ok_apps"] = alwaysOkApps
         raw["menu_style"] = menuStyle
+        raw["blocking"] = blocking
+        raw["cover_sound"] = coverSound
         // "None" keeps the AI off; the planner then works by hand only.
         raw["ai"] = ["provider": aiProvider.isEmpty ? "none" : aiProvider, "model": aiModel.trimmingCharacters(in: .whitespaces),
                      "base_url": aiBaseURL.trimmingCharacters(in: .whitespaces)]
@@ -360,15 +366,34 @@ struct DistractionsTab: View {
     var body: some View {
         Form {
             Section {
+                Picker("Distracting apps", selection: $m.blocking) {
+                    Text("Nudge only").tag("nudge")
+                    Text("Cover").tag("cover")
+                    Text("Hard").tag("hard")
+                }
+                .pickerStyle(.segmented)
+                Toggle("Play a sound when something gets covered", isOn: $m.coverSound)
+            } header: { Text("Blocking") } footer: {
+                Text(m.blocking == "nudge"
+                     ? "Distracting apps only get a nudge in the notch. Sites below, and strict blocks, still get covered."
+                     : m.blocking == "hard"
+                     ? "During a focus block, distracting apps and sites get covered, with no \"Give me 5 min\"."
+                     : "During a focus block, distracting apps and sites get covered. \"Give me 5 min\" unlocks after \(Int(Engine.snoozeWait)) seconds, \(Engine.snoozesPerBlock) times per block.")
+            }
+            Section {
                 TokenList(items: $m.blockSites, placeholder: "e.g. youtube.com")
             } header: { Text("Cover these sites during a block") } footer: {
                 Text("A cover goes over the page; the tab stays open so you don't lose your place.")
             }
             Section("Count as drifting") { TokenList(items: $m.distractingSites, placeholder: "e.g. reddit.com") }
-            Section("Distracting apps") { TokenList(items: $m.distractingApps, placeholder: "e.g. Discord") }
+            Section {
+                TokenList(items: $m.distractingApps, placeholder: "e.g. Discord")
+            } header: { Text("Distracting apps") } footer: {
+                Text(m.blocking == "nudge" ? "Count as drifting during a block." : "Covered during a focus block, unless the block lists them as on task.")
+            }
             Section {
                 TokenList(items: $m.alwaysOkApps, placeholder: "e.g. Spotify")
-            } header: { Text("Always fine") } footer: { Text("Never counted as drifting, in any block.") }
+            } header: { Text("Always fine") } footer: { Text("Never counted as drifting or covered, in any block.") }
         }
         .formStyle(.grouped)
     }

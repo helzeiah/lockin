@@ -170,7 +170,7 @@ def todos_from_claude(text):
                     for a, b, t, f in events) or "none"
     free = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free_windows(events, day_end)) or "none left today"
     current = [{"ref": t["id"], "task": t["task"], "block": t["block"], "minutes": t["minutes"],
-                "start": t.get("start", ""), "done": bool(t.get("done"))} for t in items]
+                "start": t.get("start", ""), "done": bool(t.get("done")), "minutes_already_worked": t.get("spent", 0)} for t in items]
     history = "\n".join(f"{m['role']}: {m['text']}" for m in chat[-8:]) or "none"
     back = [{"ref": b["id"], "task": b["task"], "block": b["block"], "minutes": b["minutes"], "from": b.get("from")} for b in backlog]
     item = {"type": "object", "properties": {
@@ -192,6 +192,7 @@ How to update:
   mark things done ("I did X", "finished X"), add new tasks, remove or postpone ones he drops, change durations,
   and re-time everything when their availability changes ("free at 8 now", "only an hour left", "class ran late").
 - Keep each existing item's "ref"; use "new" for added items. Keep done items in the list with done=true, start "".
+- "minutes" is an item's total length. If it has minutes_already_worked, only the rest still needs room in the schedule.
 - BACKLOG = unfinished items from earlier days. Do NOT add them on your own. Only if their message asks for one
   ("bring back X", "add my backlog", "add from backlog: X") include it, using its backlog "ref".
 - One concrete action per item ("Write the intro section of the essay"). Chunks of 25-90 minutes.
@@ -214,11 +215,13 @@ Earlier today: {history}
 Their message:
 {text}"""
     res = ai.ask_json(cfgj, prompt, schema)
-    known = {t["id"] for t in items} | {b["id"] for b in backlog}
+    known = {t["id"]: t for t in items} | {b["id"]: b for b in backlog}
     new_items = []
     for it in res["items"]:
         ref = it.pop("ref", "new")
         it["id"] = ref if ref in known else uuid.uuid4().hex[:8]
+        if known.get(ref, {}).get("spent"):
+            it["spent"] = known[ref]["spent"]   # time already worked survives a re-plan
         new_items.append(it)
     chat = (chat + [{"role": "user", "text": text}, {"role": "planner", "text": res["reply"]}])[-12:]
     if TODOS.exists():  # keep the previous version, in case an edit goes wrong
@@ -236,15 +239,31 @@ def today_events(day=None):
     return [e for e in (json.loads(l) for l in LOG.read_text().splitlines() if l.strip()) if e["ts"].startswith(day)]
 
 
+def clock(t):
+    return f"{t:%-I:%M %p}"
+
+
+def todo_start(t, now):
+    """A to-do's "HH:MM" start as a datetime today, or None."""
+    try:
+        h, m = map(int, (t.get("start") or "").split(":"))
+        return now.replace(hour=h, minute=m, second=0, microsecond=0)
+    except ValueError:
+        return None
+
+
 def plan():
     now = dt.datetime.now()
     lines = []
-    left = [(a, b, t) for a, b, t, f in calendar_today() if f and b > now]
-    if left:
-        lines.append("• Classes: " + ", ".join(f"{t.split('|')[0].strip()} {a:%-I:%M}" for a, b, t in left[:4]))
+    # One timeline: calendar events still to come and today's to-dos, each with its start time.
+    timeline = [(a, f"• {clock(a)} · {t.split('|')[0].strip()} (until {clock(b)})")
+                for a, b, t, f in calendar_today() if b > now]
     open_todos = [t for t in load_todos() if not t.get("done")]
-    for t in open_todos[:3]:
-        lines.append(f"• {t['task']} ({t['minutes']} min)")
+    for t in open_todos:
+        st = todo_start(t, now)
+        left = max(1, t["minutes"] - t.get("spent", 0))
+        timeline.append((st or dt.datetime.max, f"• {clock(st) + ' · ' if st else ''}{t['task']} ({left} min)"))
+    lines += [l for _, l in sorted(timeline, key=lambda x: x[0])[:6]]
     if JOBS_DB and JOBS_DB.exists():
         db = sqlite3.connect(JOBS_DB)
         for company, title, due in deadlines():
@@ -265,7 +284,7 @@ def plan():
     first = "Start with what's due soonest" if any("due TODAY" in l or "due tomorrow" in l for l in lines) else "Start with your hardest block"
     tip = "" if open_todos else "\nNo to-dos yet: open Plan my day and add them."
     when = " while you're fresh" if now.hour < 12 else ""
-    return "Today's plan\n" + "\n".join(lines[:7]) + f"\n\n{first}{when}." + tip
+    return "Today's plan\n" + "\n".join(lines[:9]) + f"\n\n{first}{when}." + tip
 
 
 def recap():
@@ -275,8 +294,9 @@ def recap():
     drifts = [e for e in ev if e["type"] == "drift"]
     done = sorted({e["name"] for e in blocks if e.get("completed")})
     quit_ = sorted({e["name"] for e in blocks if not e.get("completed")})
+    covers = [e for e in ev if e["type"] == "blocked"]  # a site or app that got covered
     top = {}
-    for d in drifts:
+    for d in drifts + covers:
         top[d.get("what", "?")] = top.get(d.get("what", "?"), 0) + 1
     worst = ", ".join(f"{k} ({v})" for k, v in sorted(top.items(), key=lambda x: -x[1])[:3])
     if not blocks:

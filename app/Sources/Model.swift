@@ -90,6 +90,8 @@ struct Config: Codable {
     var blocks: [Preset]
     var ai: AISettings? = nil
     var menu_style: String? = "both"   // what "Start" shows in the menu: both | quick | blocks
+    var blocking: String? = "cover"    // distracting apps during a focus block: nudge | cover | hard (cover, no "Give me 5 min")
+    var cover_sound: Bool? = true      // a soft sound when a cover goes up
     var aiOn: Bool { !["", "none"].contains(ai?.provider ?? "none") }
 
     static func load() -> Config? {
@@ -107,7 +109,9 @@ struct Todo: Codable, Identifiable, Hashable {
     var done: Bool? = false
     var why: String? = ""
     var from: String? = nil          // backlog items: the day they were planned for
+    var spent: Int? = 0              // minutes already worked on it in earlier, unfinished blocks
     var isDone: Bool { done ?? false }
+    var left: Int { max(1, minutes - (spent ?? 0)) }
 }
 
 struct ChatMsg: Codable, Hashable { var role: String; var text: String }
@@ -160,6 +164,7 @@ struct ActiveBlock: Codable {
     var minutes: Int
     var offSeconds: Double
     var apps: [String]? = nil   // quick focus: the apps picked when it started (no saved block behind it)
+    var snoozes: Int? = nil     // "Give me 5 min" passes used on covers this block
 }
 
 func today() -> String {

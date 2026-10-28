@@ -4,10 +4,17 @@ import Foundation
 
 enum CardAction: Hashable { case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, addFive }
 
-/// The cover's target: a distracting site, or (strict blocks) any app or page outside the block.
-struct Blocked: Equatable { var site: String; var app: String; var frame: NSRect?; var strict: Bool }
+/// The cover's target: a distracting site, a distracting app, or (strict blocks) any app or page outside the block.
+struct Blocked: Equatable {
+    enum Kind { case site, app, strict }
+    var site: String
+    var app: String
+    var frame: NSRect?
+    var kind: Kind
+    var strict: Bool { kind == .strict }
+}
 
-struct CardLine: Hashable { var text: String; var trailing: String = ""; var deadline = false; var bullet = true }
+struct CardLine: Hashable { var text: String; var trailing: String = ""; var deadline = false; var bullet = true; var time = ""; var calendar = false }
 struct CardButton: Hashable { var label: String; var action: CardAction; var primary = false }
 struct Card: Identifiable, Equatable {
     let id = UUID()
@@ -47,6 +54,8 @@ final class Engine: ObservableObject {
     private var lastOnTask: (app: String, url: String)?
     private var lastIdleNudge = Date().addingTimeInterval(-30 * 60)
     private var lastBlockEnd = Date.distantPast
+    @Published private(set) var coverShownAt = Date.distantPast
+    private var lastCoverSound = Date.distantPast
     private var closeTask: DispatchWorkItem?
     private var checking = false
 
@@ -65,6 +74,22 @@ final class Engine: ObservableObject {
         return min(1, max(0, 1 - remaining / Double(b.minutes * 60)))
     }
     var nextTodo: Todo? { todos.first { !$0.isDone } }
+
+    // Covers: "Give me 5 min" waits a few seconds and runs out (ScreenZen-style friction), unless blocking is "Nudge only".
+    static let snoozesPerBlock = 2
+    static let snoozeWait = 10.0
+    var blockingMode: String { cfg.blocking ?? "cover" }
+    var snoozesLeft: Int {
+        switch blockingMode {
+        case "nudge": return .max
+        case "hard": return 0
+        default: return max(0, Engine.snoozesPerBlock - (block?.snoozes ?? 0))
+        }
+    }
+    /// Seconds until "Give me 5 min" can be clicked on the current cover.
+    var snoozeWaitLeft: Int {
+        blockingMode == "nudge" ? 0 : max(0, Int((Engine.snoozeWait - now.timeIntervalSince(coverShownAt)).rounded(.up)))
+    }
 
     init() {
         cfg = Config.load() ?? Config(distractions: Distractions(apps: [], sites: []), block_sites: [], blocks: [])
@@ -124,12 +149,20 @@ final class Engine: ObservableObject {
         d.items.append(Todo(id: String(UUID().uuidString.prefix(8)).lowercased(), task: task, block: block, minutes: minutes, start: start))
         d.sortItems(); d.save(); reloadTodos()
     }
-    func updateTodo(_ id: String, start: String? = nil, minutes: Int? = nil) {
+    /// Edits a to-do in today's plan or the backlog. Only the fields passed change; id, done, spent and why stay.
+    func updateTodo(_ id: String, task: String? = nil, block: String? = nil, start: String? = nil, minutes: Int? = nil) {
         var d = TodoDoc.load()
-        guard let i = d.items.firstIndex(where: { $0.id == id }) else { return }
-        if let start { d.items[i].start = start }
-        if let minutes { d.items[i].minutes = minutes }
-        d.sortItems(); d.save(); reloadTodos()
+        func apply(_ t: inout Todo) {
+            if let task { t.task = task }
+            if let block { t.block = block }
+            if let start { t.start = start }
+            if let minutes { t.minutes = minutes }
+        }
+        if let i = d.items.firstIndex(where: { $0.id == id }) { apply(&d.items[i]); d.sortItems() }
+        else if let i = d.backlog?.firstIndex(where: { $0.id == id }) { apply(&d.backlog![i]) }
+        else { return }
+        d.save(); reloadTodos()
+        if let task, var b = self.block, b.todoId == id { b.task = task; self.block = b; persist() }   // renamed while running
     }
     func deleteTodo(_ id: String) { var d = TodoDoc.load(); d.items.removeAll { $0.id == id }; d.save(); reloadTodos() }
     func dropFromBacklog(_ id: String) {
@@ -165,7 +198,7 @@ final class Engine: ObservableObject {
 
     func startTodo(_ t: Todo, minutes: Int? = nil) {
         guard let p = presetFor(t.block) ?? cfg.blocks.first else { return }
-        startBlock(p, minutes: minutes ?? t.minutes, task: t.task, todoId: minutes == nil ? t.id : nil)
+        startBlock(p, minutes: minutes ?? t.left, task: t.task, todoId: minutes == nil ? t.id : nil)
     }
 
     func startBreak() {
@@ -192,7 +225,10 @@ final class Engine: ObservableObject {
         let focused = max(0, elapsed - Int(b.offSeconds / 60))
         appendLog(["type": "block_end", "name": b.name, "task": b.task ?? "", "completed": completed, "planned_min": b.minutes,
                    "elapsed_min": elapsed, "focused_min": focused])
-        if completed, let id = b.todoId { setDone(id, true) }
+        if let id = b.todoId {
+            if completed { setDone(id, true) }
+            else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
+        }
         guard !silent else { return }
         if completed {
             NSSound(named: "Glass")?.play()
@@ -281,13 +317,14 @@ final class Engine: ObservableObject {
         // a site the block explicitly allows wins over the cover (e.g. a NeetCode video on YouTube during LeetCode)
         let allowed = anyIn(c.url + " " + c.title, p.sites) != nil
         var (state, what) = classify(c, p)
+        let appSnoozed = (snoozedSites["app:" + c.app] ?? .distantPast) >= Date()
         if Detect.browsers[c.app] != nil, !allowed, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
-            if blocked?.site != site { appendLog(["type": "blocked", "name": b.name, "what": site]) }
-            blocked = Blocked(site: site, app: c.app, frame: frame, strict: false)
-        } else if strictViolation(c, p, state), (snoozedSites["app:" + c.app] ?? .distantPast) < Date() {
+            cover(Blocked(site: site, app: c.app, frame: frame, kind: .site))
+        } else if blockingMode != "nudge", isDistractingApp(c.app, p), !appSnoozed {
+            cover(Blocked(site: "", app: c.app, frame: frame, kind: .app))
+        } else if strictViolation(c, p, state), !appSnoozed {
             // "only these apps" blocks: anything else gets the cover too
-            if blocked?.app != c.app { appendLog(["type": "blocked", "name": b.name, "what": c.app]) }
-            blocked = Blocked(site: "", app: c.app, frame: frame, strict: true)
+            cover(Blocked(site: "", app: c.app, frame: frame, kind: .strict))
             if state != "off" { state = "off"; what = "\(c.app) isn't part of this block" }
         } else if blocked != nil { blocked = nil }
 
@@ -317,22 +354,51 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Shows the cover, or moves it along with its window. A new cover is logged like a drift (the recap counts it)
+    /// and plays a soft sound, at most every 30 seconds.
+    private func cover(_ new: Blocked) {
+        if blocked?.app != new.app || blocked?.site != new.site {
+            appendLog(["type": "blocked", "name": block?.name ?? "", "what": new.site.isEmpty ? new.app : new.site])
+            coverShownAt = Date()
+            if cfg.cover_sound ?? true, Date().timeIntervalSince(lastCoverSound) > 30, let s = NSSound(named: "Funk") {
+                lastCoverSound = Date(); s.volume = 0.5; s.play()
+            }
+        }
+        blocked = new
+    }
+
+    /// Apps that can never be covered: lockin itself, macOS's own UI, and the always-fine list.
+    private func neverCover(_ app: String) -> Bool {
+        app.isEmpty || app == selfAppName || Detect.systemApps.contains(app) || anyIn(app, cfg.always_ok_apps) != nil
+    }
+
+    /// An app on the distracting list that this block doesn't explicitly allow.
+    private func isDistractingApp(_ app: String, _ p: Preset) -> Bool {
+        !neverCover(app) && anyIn(app, cfg.distractions.apps) != nil && anyIn(app, p.apps) == nil
+    }
+
     /// In a strict block, is the front app/page outside the allowed list? A browser you picked is fine on any page
-    /// that isn't a distraction; lockin's own windows and always-fine apps never count.
+    /// that isn't a distraction; lockin's own windows, system UI and always-fine apps never count.
     private func strictViolation(_ c: FrontContext, _ p: Preset, _ state: String) -> Bool {
-        guard p.strict == true, state != "on", !c.app.isEmpty, c.app != selfAppName,
-              anyIn(c.app, cfg.always_ok_apps) == nil else { return false }
+        guard p.strict == true, state != "on", !neverCover(c.app) else { return false }
         if Detect.browsers[c.app] != nil, state == "neutral", anyIn(c.app, p.apps) != nil { return false }
         return true
     }
 
     // MARK: blocker actions
     func snoozeSite() {
-        guard let b = blocked else { return }
-        let key = b.strict ? "app:" + b.app : b.site
+        guard let b = blocked, snoozesLeft > 0, snoozeWaitLeft == 0 else { return }
+        let key = b.kind == .site ? b.site : "app:" + b.app
         snoozedSites[key] = Date().addingTimeInterval(300)
-        appendLog(["type": "drift", "name": block?.name ?? "", "what": "\(b.strict ? b.app : b.site) (took 5)"])
+        appendLog(["type": "drift", "name": block?.name ?? "", "what": "\(b.kind == .site ? b.site : b.app) (took 5)"])
+        if blockingMode != "nudge", var a = block { a.snoozes = (a.snoozes ?? 0) + 1; block = a; persist() }
         blocked = nil
+    }
+    /// Hides the covered app (it keeps running) and goes back to the last on-task app.
+    func hideBlockedApp() {
+        guard let app = blocked?.app else { return }
+        NSWorkspace.shared.runningApplications.first { $0.localizedName == app }?.hide()
+        backToWork()
     }
     func closeBlockedTab() {
         guard let app = blocked?.app else { return }
@@ -388,6 +454,12 @@ final class Engine: ObservableObject {
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].done = done }
         d.save(); reloadTodos()
     }
+    func addSpent(_ id: String, _ minutes: Int) {
+        guard minutes > 0 else { return }
+        var d = TodoDoc.load()
+        if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].spent = (d.items[i].spent ?? 0) + minutes }
+        d.save(); reloadTodos()
+    }
     func clearDay() { var d = TodoDoc.load(); d.items = []; d.chat = []; d.date = today(); d.save(); reloadTodos() }
 
     func sendToPlanner(_ text: String) {
@@ -412,16 +484,21 @@ final class Engine: ObservableObject {
         var lines: [CardLine] = []
         for raw in text.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) where !raw.isEmpty && raw != "Today's plan" {
             if raw.hasPrefix("• ") {
-                var t = String(raw.dropFirst(2)), trailing = "", deadline = false
+                var t = String(raw.dropFirst(2)), trailing = "", deadline = false, time = "", calendar = false
+                if let r = t.range(of: #"^\d{1,2}:\d{2} [AP]M · "#, options: .regularExpression) {
+                    time = String(t[r].dropLast(3)); t.removeSubrange(r)
+                }
                 if let r = t.range(of: #"\s*\((\d+) min\)$"#, options: .regularExpression) {
                     trailing = String(t[r]).trimmingCharacters(in: CharacterSet(charactersIn: " ()")); t.removeSubrange(r)
+                } else if let r = t.range(of: #"\s*\(until [^)]+\)$"#, options: .regularExpression) {   // calendar event
+                    trailing = String(t[r]).trimmingCharacters(in: CharacterSet(charactersIn: " ()")); t.removeSubrange(r); calendar = true
                 }
                 if let r = t.range(of: " due ") {
                     deadline = true; trailing = String(t[r.upperBound...]).replacingOccurrences(of: "in ", with: "")
                     t = String(t[..<r.lowerBound]).replacingOccurrences(of: ": coding test", with: "").replacingOccurrences(of: ":", with: "")
                 }
                 if t.hasPrefix("Classes: ") { t = String(t.dropFirst(9)); trailing = "classes" }
-                lines.append(CardLine(text: t, trailing: trailing, deadline: deadline))
+                lines.append(CardLine(text: t, trailing: trailing, deadline: deadline, time: time, calendar: calendar))
             } else { lines.append(CardLine(text: raw, bullet: false)) }
         }
         return lines

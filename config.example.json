@@ -19,6 +19,8 @@
     8,
     23
   ],
+  "blocking": "cover",
+  "cover_sound": true,
   "always_ok_apps": [
     "Finder",
     "System Settings",

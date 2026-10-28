@@ -225,8 +225,12 @@ struct IslandView: View {
                     ForEach(Array(c.lines.enumerated()), id: \.offset) { i, l in
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
                             if l.bullet {
-                                Circle().fill(l.deadline ? tintColor("orange") : (l.trailing == "classes" ? Color.purple : tintColor("blue")))
+                                Circle().fill(l.deadline ? tintColor("orange") : (l.calendar || l.trailing == "classes" ? Color.purple : tintColor("blue")))
                                     .frame(width: 6, height: 6).offset(y: -1)
+                            }
+                            if c.lines.contains(where: { !$0.time.isEmpty }) && l.bullet {   // time column, kept aligned
+                                Text(l.time).font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+                                    .foregroundStyle(.white.opacity(0.75)).frame(width: 58, alignment: .leading)
                             }
                             Text(l.text).font(.system(size: 13)).foregroundStyle(.white.opacity(l.bullet ? 0.92 : 0.6))
                                 .fixedSize(horizontal: false, vertical: true)

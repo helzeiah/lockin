@@ -14,6 +14,10 @@ enum Detect {
                                              "Brave Browser": "chromium", "Microsoft Edge": "chromium", "Vivaldi": "chromium",
                                              "Opera": "chromium", "Chromium": "chromium", "Safari": "safari"]
     static let terminals: Set<String> = ["iTerm2", "Terminal"]
+    /// macOS's own UI (login, Dock, Spotlight, password prompts…). Never covered, whatever the lists say.
+    static let systemApps: Set<String> = ["loginwindow", "Dock", "SystemUIServer", "Control Center", "Notification Center",
+                                          "Spotlight", "WindowManager", "ScreenSaverEngine", "SecurityAgent", "CoreServicesUIAgent",
+                                          "UserNotificationCenter", "universalAccessAuthWarn"]
 
     static func frontApp() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "" }
 

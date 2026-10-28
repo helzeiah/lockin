@@ -47,6 +47,7 @@ struct PlannerView: View {
     @State private var text = ""
     @FocusState private var focused: Bool
     @State private var hoverId: String?
+    @State private var editingId: String?     // the to-do (plan or backlog) open in the inline editor
 
     private var dateLine: String { Date().formatted(.dateTime.weekday(.wide).month(.wide).day()) }
     private var hasPlan: Bool { !e.todos.isEmpty }
@@ -114,7 +115,7 @@ struct PlannerView: View {
 
     private var summary: some View {
         let open = e.todos.filter { !$0.isDone }
-        let mins = open.reduce(0) { $0 + $1.minutes }
+        let mins = open.reduce(0) { $0 + $1.left }
         let end = open.compactMap { t -> Date? in startDate(t).map { $0.addingTimeInterval(Double(t.minutes * 60)) } }.max()
         return VStack(alignment: .trailing, spacing: 2) {
             Text(open.isEmpty ? "All done" : "\(mins / 60 > 0 ? "\(mins / 60)h " : "")\(mins % 60)m left")
@@ -134,7 +135,10 @@ struct PlannerView: View {
         ScrollView {
             LazyVStack(spacing: 2) {
                 let nextId = e.nextTodo?.id
-                ForEach(e.todos) { t in row(t, isNext: t.id == nextId) }
+                ForEach(e.todos) { t in
+                    if editingId == t.id { TodoEditor(t: t) { editingId = nil }.padding(.vertical, 4) }
+                    else { row(t, isNext: t.id == nextId) }
+                }
             }
             .padding(.horizontal, 16).padding(.bottom, 12)
         }
@@ -163,13 +167,17 @@ struct PlannerView: View {
                     .strikethrough(t.isDone).foregroundStyle(t.isDone ? .tertiary : .primary)
                 HStack(spacing: 8) {
                     HStack(spacing: 5) { Circle().fill(colorFor(block: t.block)).frame(width: 7, height: 7); Text(t.block) }
-                    Text("\(t.minutes) min")
+                    Text(!t.isDone && (t.spent ?? 0) > 0 ? "\(t.left) of \(t.minutes) min left" : "\(t.minutes) min")
                     if let why = t.why, !why.isEmpty { Text(why).foregroundStyle(.tertiary) }
                 }
                 .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
             }
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { editingId = t.id }      // click a to-do to edit it
             if hoverId == t.id {
+                Button { editingId = t.id } label: { Image(systemName: "pencil").font(.system(size: 11.5)) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Edit")
                 Button { e.deleteTodo(t.id) } label: { Image(systemName: "trash").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
             }
@@ -213,24 +221,30 @@ struct PlannerView: View {
                 ScrollView {
                     VStack(spacing: 1) {
                         ForEach(e.backlog) { t in
-                            HStack(spacing: 10) {
-                                Circle().fill(colorFor(block: t.block)).frame(width: 6, height: 6)
-                                Text(t.task).font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1)
-                                Spacer(minLength: 6)
-                                Text("\(t.minutes)m · \(dayLabel(t.from))").font(.system(size: 11, design: .rounded)).foregroundStyle(.tertiary)
-                                Button { e.addFromBacklog(t) } label: { Label("Today", systemImage: "plus").font(.system(size: 11, weight: .semibold)) }
-                                    .buttonStyle(.bordered).controlSize(.mini).disabled(e.planning)
-                                Button { e.dropFromBacklog(t.id) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                                    .buttonStyle(.plain).foregroundStyle(.tertiary).help("Drop it")
-                            }
-                            .padding(.vertical, 4).padding(.horizontal, 8)
+                            if editingId == t.id { TodoEditor(t: t, backlog: true) { editingId = nil }.padding(.vertical, 3) }
+                            else { backlogRow(t) }
                         }
                     }
                 }
-                .frame(maxHeight: 130)
+                .frame(maxHeight: e.backlog.contains { $0.id == editingId } ? 190 : 130)   // room for the editor
             }
         }
         .padding(.horizontal, 24).padding(.top, 6)
+    }
+
+    private func backlogRow(_ t: Todo) -> some View {
+        HStack(spacing: 10) {
+            Circle().fill(colorFor(block: t.block)).frame(width: 6, height: 6)
+            Text(t.task).font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle()).onTapGesture { editingId = t.id }.help("Click to edit")
+            Text("\(t.minutes)m · \(dayLabel(t.from))").font(.system(size: 11, design: .rounded)).foregroundStyle(.tertiary)
+            Button { e.addFromBacklog(t) } label: { Label("Today", systemImage: "plus").font(.system(size: 11, weight: .semibold)) }
+                .buttonStyle(.bordered).controlSize(.mini).disabled(e.planning)
+            Button { e.dropFromBacklog(t.id) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                .buttonStyle(.plain).foregroundStyle(.tertiary).help("Drop it")
+        }
+        .padding(.vertical, 4).padding(.horizontal, 8)
     }
 
     private var empty: some View {
@@ -395,6 +409,81 @@ struct ManualAdd: View {
         guard !t.isEmpty else { return }
         e.addTodo(task: t, block: block, minutes: minutes, start: hhmm(start))
         task = ""; suggested = true; refreshSuggestion(); taskFocused = true   // ready for the next one
+    }
+}
+
+// Edit a to-do by hand: its text, focus block, length and start (backlog items have no start). Same look as
+// "Add a block". Keeps the id, done, spent and why; changing the length leaves the minutes already worked alone.
+struct TodoEditor: View {
+    @EnvironmentObject var e: Engine
+    let t: Todo
+    var backlog = false
+    var onClose: () -> Void
+    @State private var task: String
+    @State private var block: String
+    @State private var minutes: Int
+    @State private var start: Date
+    @State private var timed: Bool          // has a start time (unscheduled to-dos show "later")
+    @FocusState private var taskFocused: Bool
+
+    init(t: Todo, backlog: Bool = false, onClose: @escaping () -> Void) {
+        self.t = t; self.backlog = backlog; self.onClose = onClose
+        let s = parseHHMM(t.start ?? "")
+        _task = State(initialValue: t.task)
+        _block = State(initialValue: t.block)
+        _minutes = State(initialValue: t.minutes)
+        _start = State(initialValue: s ?? Date())
+        _timed = State(initialValue: s != nil)
+    }
+
+    /// Saved blocks, plus this to-do's own block if it isn't one of them (the AI can name blocks loosely).
+    private var blockNames: [String] {
+        let names = e.cfg.blocks.map(\.name)
+        return names.contains(t.block) ? names : [t.block] + names
+    }
+    private var note: String {
+        let spent = t.spent ?? 0
+        guard spent > 0, !t.isDone else { return "Return saves · Esc cancels" }
+        return "\(spent) min already done · \(max(1, minutes - spent)) left"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("What are you doing? e.g. Problem set 4", text: $task)
+                .textFieldStyle(.roundedBorder).focused($taskFocused).onSubmit(save)
+            HStack(spacing: 12) {
+                Picker("", selection: $block) { ForEach(blockNames, id: \.self) { b in Text(b).tag(b) } }
+                    .labelsHidden().frame(maxWidth: 170)
+                Stepper("\(minutes) min", value: $minutes, in: 5...240, step: 5).fixedSize()
+                if !backlog {
+                    if timed {
+                        DatePicker("", selection: $start, displayedComponents: .hourAndMinute).labelsHidden().fixedSize()
+                    } else {
+                        Button("Set a time") { timed = true }.controlSize(.small)
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                Text(note).font(.system(size: 11.5)).foregroundStyle(.tertiary)
+                if !backlog && timed {
+                    Button("No set time") { timed = false }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Color.accentColor)
+                }
+                Spacer()
+                Button("Cancel", action: onClose).controlSize(.small).keyboardShortcut(.cancelAction)
+                Button("Save", action: save).buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(task.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .onAppear { taskFocused = true }
+    }
+
+    private func save() {
+        let text = task.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        e.updateTodo(t.id, task: text, block: block, start: backlog ? nil : (timed ? hhmm(start) : ""), minutes: minutes)
+        onClose()
     }
 }
 
