@@ -2,7 +2,15 @@ import AppKit
 import Combine
 import Foundation
 
-enum CardAction: Hashable { case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, addFive }
+enum CardAction: Hashable { case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, addFive, startGoal, openStats }
+
+/// A short message that drops out of the notch for a few seconds (check-ins). Never steals focus, never needs a click.
+struct Flash: Equatable {
+    let id = UUID()
+    var text: String
+    var icon: String
+    var tint: String = "green"
+}
 
 /// The cover's target: a distracting site, a distracting app, or (strict blocks) any app or page outside the block.
 struct Blocked: Equatable {
@@ -36,6 +44,12 @@ final class Engine: ObservableObject {
     @Published var now = Date()
     @Published var drifting = false
     @Published var card: Card?
+    /// The stats drop-down under the notch.
+    @Published var statsShown = false
+    @Published var plannerTab: PlannerTab = .plan
+    @Published var flash: Flash?
+    private var flashTask: DispatchWorkItem?
+    private var checkedIn: (half: Double, last: Double) = (0, 0)   // the block (by start time) each check-in already ran for
     @Published var todos: [Todo] = []
     @Published var chat: [ChatMsg] = []
     @Published var backlog: [Todo] = []
@@ -186,6 +200,7 @@ final class Engine: ObservableObject {
         appendLog(["type": "block_start", "name": p.name, "minutes": m, "task": task ?? ""])
         persist()
         show(Card(icon: "scope", tint: "green", title: task ?? p.name, subtitle: "\(m) minutes · phone away, one thing at a time"), close: 2.6)
+        play("Tink", volume: 0.35)
     }
 
     /// A block with no name: just a length and the apps you'll use. Everything else gets covered.
@@ -230,13 +245,20 @@ final class Engine: ObservableObject {
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
         }
         guard !silent else { return }
+        let st = stats()
+        let goal = st.goal, today = st.todayMinutes
+        let hitGoal = today >= goal && today - focused < goal   // this block is the one that made today count
         if completed {
-            NSSound(named: "Glass")?.play()
-            show(Card(icon: "checkmark.circle.fill", tint: "green", title: b.task ?? b.name,
-                      subtitle: "Done · \(focused) min focused",
+            play(hitGoal ? "Hero" : "Glass", volume: hitGoal ? 0.5 : 0.45)
+            let line = hitGoal ? "Today counts · \(st.streak)-day streak" : "\(fmtMinutes(today)) today" + (today < goal ? " · \(goal - today) min to count the day" : "")
+            show(Card(icon: hitGoal ? "flame.fill" : "checkmark.circle.fill", tint: hitGoal ? "orange" : "green",
+                      title: hitGoal ? "Day done. \(b.task ?? b.name)" : (b.task ?? b.name),
+                      subtitle: "\(focused) min focused · \(line)",
                       buttons: [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]))
+        } else if focused >= 5 {
+            show(Card(icon: "stop.circle.fill", tint: "white", title: "Stopped", subtitle: "\(focused) min focused. That still counts · \(fmtMinutes(today)) today"), close: 3)
         } else {
-            show(Card(icon: "stop.circle.fill", tint: "white", title: "Stopped", subtitle: "\(elapsed) min in. That still counts."), close: 2.5)
+            show(Card(icon: "stop.circle.fill", tint: "white", title: "Stopped", subtitle: "Restarting is the skill. Try 10 minutes next."), close: 3)
         }
     }
 
@@ -245,6 +267,7 @@ final class Engine: ObservableObject {
     // MARK: cards
     func show(_ c: Card, close: Double? = nil) {
         closeTask?.cancel()
+        statsShown = false
         card = c
         if let close = close ?? c.autoClose {
             let w = DispatchWorkItem { [weak self] in Task { @MainActor in if self?.card?.id == c.id { self?.card = nil } } }
@@ -264,8 +287,34 @@ final class Engine: ObservableObject {
         case .openPlanner: Planner.shared.open()
         case .stop: stopBlock(completed: false)
         case .addFive: addFive()
+        case .openStats: Planner.shared.open(tab: .stats)
+        case .startGoal:
+            let need = max(10, (cfg.stats_goal ?? 25) - stats().todayMinutes)
+            if let t = nextTodo { startTodo(t, minutes: max(need, 25)) }
+            else if let p = cfg.blocks.first { startBlock(p, minutes: max(need, 25)) }
+            else { Planner.shared.open() }
         }
     }
+
+    func showStats() { card = nil; statsShown = true }
+
+    func showFlash(_ text: String, icon: String, tint: String = "green", seconds: Double = 4.5) {
+        guard card == nil, !statsShown else { return }
+        flashTask?.cancel()
+        let f = Flash(text: text, icon: icon, tint: tint)
+        flash = f
+        let w = DispatchWorkItem { [weak self] in Task { @MainActor in if self?.flash?.id == f.id { self?.flash = nil } } }
+        flashTask = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+    }
+
+    /// Soft system sounds, quiet by default. One switch in Settings turns them all off.
+    func play(_ name: String, volume: Float = 0.4) {
+        guard cfg.sounds ?? true, let s = NSSound(named: name) else { return }
+        s.volume = volume; s.play()
+    }
+
+    func stats() -> Stats { Stats.load(goal: cfg.stats_goal ?? 25, weekGoal: cfg.stats_week_goal ?? 5, live: block) }
 
     func tapIsland() {
         guard let b = block else { return }
@@ -279,7 +328,22 @@ final class Engine: ObservableObject {
     // MARK: loop
     private func tick() {
         now = Date()
-        if let b = block, now.timeIntervalSince1970 >= b.ends { stopBlock(completed: b.kind == "focus") }
+        if let b = block, now.timeIntervalSince1970 >= b.ends { stopBlock(completed: b.kind == "focus"); return }
+        checkIns()
+    }
+
+    /// Halfway and last-minute check-ins: a line drops out of the notch for a few seconds. Silent on purpose.
+    private func checkIns() {
+        guard cfg.check_ins ?? true, let b = block, b.kind == "focus", b.minutes >= 15, card == nil else { return }
+        if progress >= 0.5, checkedIn.half != b.started {
+            checkedIn.half = b.started
+            let focused = max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
+            showFlash(drifting ? "Halfway. Come back to \(b.task ?? b.name)" : "Halfway · \(focused) min focused so far",
+                      icon: "circle.lefthalf.filled", tint: drifting ? "red" : "green")
+        } else if remaining <= 60, checkedIn.last != b.started {
+            checkedIn.last = b.started
+            showFlash("Last minute. Finish the sentence you're on", icon: "hourglass", tint: "orange")
+        }
     }
 
     private func check() {
@@ -318,7 +382,7 @@ final class Engine: ObservableObject {
         let allowed = anyIn(c.url + " " + c.title, p.sites) != nil
         var (state, what) = classify(c, p)
         let appSnoozed = (snoozedSites["app:" + c.app] ?? .distantPast) >= Date()
-        if Detect.browsers[c.app] != nil, !allowed, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
+        if blockingMode != "nudge", Detect.browsers[c.app] != nil, !allowed, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
             cover(Blocked(site: site, app: c.app, frame: frame, kind: .site))
         } else if blockingMode != "nudge", isDistractingApp(c.app, p), !appSnoozed {
             cover(Blocked(site: "", app: c.app, frame: frame, kind: .app))
@@ -346,7 +410,7 @@ final class Engine: ObservableObject {
         drifting = offFor >= (away ? 0 : (cfg.drift_seconds ?? 30))
         let due = lastNudge == nil ? drifting : Date().timeIntervalSince(lastNudge!) >= (cfg.renudge_seconds ?? 120)
         if due, blocked == nil {
-            if lastNudge == nil { appendLog(["type": "drift", "name": b.name, "what": what ?? ""]) }
+            if lastNudge == nil { appendLog(["type": "drift", "name": b.name, "what": what ?? ""]); play("Bottle", volume: 0.3) }
             lastNudge = Date()
             show(Card(icon: "eye.fill", tint: "red", title: what ?? "Off task",
                       subtitle: "\(fmtTime(remaining)) left in \(b.task ?? b.name)",
@@ -360,7 +424,7 @@ final class Engine: ObservableObject {
         if blocked?.app != new.app || blocked?.site != new.site {
             appendLog(["type": "blocked", "name": block?.name ?? "", "what": new.site.isEmpty ? new.app : new.site])
             coverShownAt = Date()
-            if cfg.cover_sound ?? true, Date().timeIntervalSince(lastCoverSound) > 30, let s = NSSound(named: "Funk") {
+            if cfg.sounds ?? true, cfg.cover_sound ?? true, Date().timeIntervalSince(lastCoverSound) > 30, let s = NSSound(named: "Funk") {
                 lastCoverSound = Date(); s.volume = 0.5; s.play()
             }
         }
@@ -516,8 +580,11 @@ final class Engine: ObservableObject {
 
     func showRecap() {
         let text = runCoach(["recap"]).replacingOccurrences(of: "Recap: ", with: "")
-        let lines = text.split(separator: "\n").map { CardLine(text: String($0), bullet: false) }
-        show(Card(icon: "chart.bar.fill", tint: "blue", title: "Today", lines: lines, buttons: [CardButton(label: "Nice", action: .dismiss, primary: true)]))
+        var lines = text.split(separator: "\n").map { CardLine(text: String($0), bullet: false) }
+        let st = stats()
+        lines.append(CardLine(text: "This week: \(fmtMinutes(st.weekMinutes)) over \(st.weekDaysCounted) of \(st.weekGoal) days · streak \(st.streak)", bullet: false))
+        show(Card(icon: "chart.bar.fill", tint: "blue", title: "Today", subtitle: "\(fmtMinutes(st.todayMinutes)) focused",
+                  lines: lines, buttons: [CardButton(label: "Stats", action: .openStats), CardButton(label: "Nice", action: .dismiss, primary: true)]))
     }
 
     private func minute() {
@@ -525,6 +592,23 @@ final class Engine: ObservableObject {
         morningCheck(); idleNudge()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
+        if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }
+    }
+
+    /// Once an evening, if today hasn't counted yet: one card, then silence until tomorrow.
+    private func streakReminder() {
+        let key = "streakReminderShown"
+        guard UserDefaults.standard.string(forKey: key) != today(), block == nil, card == nil, Detect.idleSeconds() < 120 else { return }
+        if anyIn(Detect.frontApp(), ["zoom.us", "Microsoft Teams", "FaceTime", "Webex"]) != nil { return }
+        let st = stats()
+        guard st.todayMinutes < st.goal, st.streak > 0 || st.weekDaysCounted < st.weekGoal else { return }
+        UserDefaults.standard.set(today(), forKey: key)
+        let need = st.goal - st.todayMinutes
+        let title = st.streak > 0 ? "Keep your \(st.streak)-day streak" : "Put today on the board"
+        let sub = st.todayMinutes > 0 ? "\(need) more minutes makes today count." : "One \(max(need, 25))-minute block makes today count. \(st.weekDaysCounted)/\(st.weekGoal) days this week."
+        play("Purr", volume: 0.3)
+        show(Card(icon: "flame.fill", tint: "orange", title: title, subtitle: sub,
+                  buttons: [CardButton(label: "Not tonight", action: .dismiss), CardButton(label: "Start \(max(need, 25)) min", action: .startGoal, primary: true)]), close: 30)
     }
 
     func morningCheck() {

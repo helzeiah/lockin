@@ -1,26 +1,13 @@
 import AppKit
+import Combine
 import ServiceManagement
 import SwiftUI
 
-// Native settings window. Edits config.json in place (keeps any keys it doesn't know about).
+// Setup pages for the main window. Edits config.json in place (keeps any keys it doesn't know about).
+/// Settings live in the main lockin window (sidebar: Focus blocks, Distractions, AI planner, General).
 @MainActor
-final class SettingsWindow {
-    static let shared = SettingsWindow()
-    private var window: KeyPanel?
-
-    func open() {
-        Engine.shared.card = nil
-        if let w = window { w.show(); return }
-        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
-                         styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        w.title = "lockin Settings"
-        w.isReleasedWhenClosed = false
-        w.minSize = NSSize(width: 560, height: 460)
-        w.contentView = NSHostingView(rootView: SettingsView(model: SettingsModel()))
-        w.center()
-        window = w
-        w.show()
-    }
+enum SettingsWindow {
+    static func open(_ tab: PlannerTab = .general) { Planner.shared.open(tab: tab) }
 }
 
 final class SettingsModel: ObservableObject {
@@ -36,12 +23,17 @@ final class SettingsModel: ObservableObject {
     @Published var activeTo: Int
     @Published var distractingSites: [String]
     @Published var distractingApps: [String]
-    @Published var blockSites: [String]
     @Published var alwaysOkApps: [String]
     @Published var blocks: [Preset]
     @Published var menuStyle: String
     @Published var blocking: String
     @Published var coverSound: Bool
+    @Published var sounds: Bool
+    @Published var checkIns: Bool
+    @Published var statsGoal: Int
+    @Published var weekGoal: Int
+    @Published var streakReminderOn: Bool
+    @Published var streakReminderAt: Date
     @Published var aiProvider: String
     @Published var aiModel: String
     @Published var aiBaseURL: String
@@ -50,9 +42,10 @@ final class SettingsModel: ObservableObject {
     @Published var hasKey = Keychain.get() != nil
     @Published var testResult: (ok: Bool, text: String)?
     @Published var testing = false
-    @Published var saved = false
+    private var saving = false
 
     private var raw: [String: Any]
+    private var autosave: AnyCancellable?
 
     init() {
         raw = (try? JSONSerialization.jsonObject(with: Data(contentsOf: Paths.config))) as? [String: Any] ?? [:]
@@ -67,19 +60,28 @@ final class SettingsModel: ObservableObject {
         idleNudgeMinutes = c.idle_nudge_minutes ?? 40
         activeFrom = c.active_hours?.first ?? 8
         activeTo = c.active_hours?.last ?? 23
-        distractingSites = c.distractions.sites
+        // one list in the UI: everything distracting gets covered (or nudged, in "Nudge only")
+        distractingSites = c.block_sites + c.distractions.sites.filter { !c.block_sites.contains($0) }
         distractingApps = c.distractions.apps
-        blockSites = c.block_sites
         alwaysOkApps = c.always_ok_apps ?? []
         blocks = c.blocks
         menuStyle = c.menu_style ?? "both"
         blocking = c.blocking ?? "cover"
         coverSound = c.cover_sound ?? true
+        sounds = c.sounds ?? true
+        checkIns = c.check_ins ?? true
+        statsGoal = c.stats_goal ?? 25
+        weekGoal = c.stats_week_goal ?? 5
+        streakReminderOn = !(c.streak_reminder ?? "20:00").isEmpty
+        streakReminderAt = SettingsModel.time((c.streak_reminder ?? "").isEmpty ? "20:00" : c.streak_reminder!)
         let ai = raw["ai"] as? [String: Any] ?? [:]
         aiProvider = (ai["provider"] as? String).map { $0 == "none" ? "" : $0 } ?? ""
         aiModel = ai["model"] as? String ?? ""
         aiBaseURL = ai["base_url"] as? String ?? ""
         aboutMe = raw["about_me"] as? String ?? ""
+        // Changes save themselves a moment after you stop editing. No Save button.
+        autosave = objectWillChange.debounce(for: .seconds(0.6), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.save(includeKey: false) }
     }
 
     static let providers: [(id: String, name: String)] = [
@@ -113,7 +115,9 @@ final class SettingsModel: ObservableObject {
         return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
     }
 
-    func save() {
+    func save(includeKey: Bool = true) {
+        guard !saving else { return }
+        saving = true; defer { saving = false }
         raw["drift_seconds"] = driftSeconds
         raw["renudge_seconds"] = renudgeSeconds
         raw["break_minutes"] = breakMinutes
@@ -124,17 +128,22 @@ final class SettingsModel: ObservableObject {
         raw["idle_nudge_minutes"] = idleNudgeMinutes
         raw["active_hours"] = [activeFrom, activeTo]
         raw["distractions"] = ["sites": distractingSites, "apps": distractingApps]
-        raw["block_sites"] = blockSites
+        raw["block_sites"] = distractingSites
         raw["always_ok_apps"] = alwaysOkApps
         raw["menu_style"] = menuStyle
         raw["blocking"] = blocking
         raw["cover_sound"] = coverSound
+        raw["sounds"] = sounds
+        raw["check_ins"] = checkIns
+        raw["stats_goal"] = statsGoal
+        raw["stats_week_goal"] = weekGoal
+        raw["streak_reminder"] = streakReminderOn ? SettingsModel.hhmm(streakReminderAt) : ""
         // "None" keeps the AI off; the planner then works by hand only.
         raw["ai"] = ["provider": aiProvider.isEmpty ? "none" : aiProvider, "model": aiModel.trimmingCharacters(in: .whitespaces),
                      "base_url": aiBaseURL.trimmingCharacters(in: .whitespaces)]
         raw["about_me"] = aboutMe.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty { Keychain.set(key); apiKeyDraft = ""; hasKey = true }
+        if includeKey, !key.isEmpty { Keychain.set(key); apiKeyDraft = ""; hasKey = true }
         raw["blocks"] = blocks.map { b -> [String: Any] in
             ["name": b.name, "minutes": b.minutes, "sites": b.sites ?? [], "apps": b.apps ?? [], "projects": b.projects ?? [],
              "offline_ok": b.offline_ok ?? false, "any_claude": b.any_claude ?? false, "terminal_ok": b.terminal_ok ?? true,
@@ -144,77 +153,76 @@ final class SettingsModel: ObservableObject {
             try? d.write(to: Paths.config)
         }
         Task { @MainActor in Engine.shared.reloadConfig() }
-        saved = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { self.saved = false }
-    }
-}
-
-struct SettingsView: View {
-    @ObservedObject var model: SettingsModel
-    var body: some View {
-        VStack(spacing: 0) {
-            TabView {
-                GeneralTab(m: model).tabItem { Label("General", systemImage: "gearshape") }
-                BlocksTab(m: model).tabItem { Label("Focus blocks", systemImage: "square.stack.3d.up") }
-                DistractionsTab(m: model).tabItem { Label("Distractions", systemImage: "hand.raised") }
-                AITab(m: model).tabItem { Label("AI planner", systemImage: "sparkles") }
-            }
-            .padding(.top, 6)
-            Divider()
-            HStack {
-                Text(model.saved ? "Saved" : "Changes apply as soon as you save.")
-                    .font(.system(size: 12)).foregroundStyle(model.saved ? .green : .secondary)
-                    .animation(.easeOut(duration: 0.15), value: model.saved)
-                Spacer()
-                Button("Save") { model.save() }.keyboardShortcut("s", modifiers: .command).buttonStyle(.borderedProminent)
-            }
-            .padding(.horizontal, 18).padding(.vertical, 12)
-        }
-        .frame(minWidth: 560, minHeight: 460)
     }
 }
 
 struct GeneralTab: View {
     @ObservedObject var m: SettingsModel
+    @State private var advanced = false
     var body: some View {
         Form {
-            Section("Staying on task") {
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Setup")
+                        Text("Distractions, strictness, permissions and your goal, one screen at a time.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Run setup again") { SetupWindow.shared.open(step: .distractions) }
+                    Button("Check permissions") { SetupWindow.shared.open(step: .access) }
+                }
+            }
+            Section("Focus") {
                 LabeledContent("Nudge me after") {
-                    Stepper("\(Int(m.driftSeconds)) seconds off task", value: $m.driftSeconds, in: 10...300, step: 10)
-                }
-                LabeledContent("Remind again every") {
-                    Stepper("\(Int(m.renudgeSeconds / 60)) min", value: $m.renudgeSeconds, in: 60...900, step: 60)
-                }
-                LabeledContent("Away from Mac counts after") {
-                    Stepper("\(Int(m.macAwayMinutes)) min", value: $m.macAwayMinutes, in: 1...15, step: 1)
+                    Stepper("\(Int(m.driftSeconds)) sec off task", value: $m.driftSeconds, in: 10...300, step: 10)
                 }
                 LabeledContent("Break length") {
                     Stepper("\(m.breakMinutes) min", value: $m.breakMinutes, in: 1...30)
                 }
+                Toggle("Halfway and last-minute check-ins", isOn: $m.checkIns)
+                Toggle("Soft sounds", isOn: $m.sounds)
             }
-            Section("App") {
-                Picker("Menu shows", selection: $m.menuStyle) {
-                    Text("Quick focus and my blocks").tag("both")
-                    Text("Quick focus only").tag("quick")
-                    Text("My blocks only").tag("blocks")
+            Section("Streak") {
+                LabeledContent("A day counts after") {
+                    Stepper("\(m.statsGoal) min focused", value: $m.statsGoal, in: 10...240, step: 5)
                 }
-                Toggle("Open lockin when I log in", isOn: Binding(
-                    get: { SMAppService.mainApp.status == .enabled },
-                    set: { on in try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister(); m.objectWillChange.send() }))
+                LabeledContent("Weekly goal") {
+                    Stepper("\(m.weekGoal) days", value: $m.weekGoal, in: 1...7)
+                }
+                Toggle("Remind me in the evening if today hasn't counted", isOn: $m.streakReminderOn)
+                if m.streakReminderOn {
+                    DatePicker("Remind me at", selection: $m.streakReminderAt, displayedComponents: .hourAndMinute)
+                }
             }
-            Section("Daily rhythm") {
+            Section("Your day") {
                 Picker("Morning plan after", selection: $m.morningHour) {
                     ForEach(3..<12) { h in Text("\(h):00 AM").tag(h) }
                 }
                 DatePicker("Evening recap", selection: $m.recapAt, displayedComponents: .hourAndMinute)
-                DatePicker("Plan my day until", selection: $m.dayEnd, displayedComponents: .hourAndMinute)
+                Toggle("Open lockin when I log in", isOn: Binding(
+                    get: { SMAppService.mainApp.status == .enabled },
+                    set: { on in try? on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister(); m.objectWillChange.send() }))
             }
-            Section("When no timer is running") {
-                LabeledContent("Suggest the next to-do every") {
-                    Stepper("\(Int(m.idleNudgeMinutes)) min", value: $m.idleNudgeMinutes, in: 10...180, step: 5)
+            Section {
+                DisclosureGroup("More options", isExpanded: $advanced) {
+                    LabeledContent("Remind again every") {
+                        Stepper("\(Int(m.renudgeSeconds / 60)) min", value: $m.renudgeSeconds, in: 60...900, step: 60)
+                    }
+                    LabeledContent("Away from Mac counts after") {
+                        Stepper("\(Int(m.macAwayMinutes)) min", value: $m.macAwayMinutes, in: 1...15, step: 1)
+                    }
+                    LabeledContent("With no timer, suggest the next to-do every") {
+                        Stepper("\(Int(m.idleNudgeMinutes)) min", value: $m.idleNudgeMinutes, in: 10...180, step: 5)
+                    }
+                    Picker("Only between", selection: $m.activeFrom) { ForEach(5..<14) { h in Text(hourLabel(h)).tag(h) } }
+                    Picker("and", selection: $m.activeTo) { ForEach(16..<25) { h in Text(hourLabel(h % 24)).tag(h) } }
+                    DatePicker("Plan my day until", selection: $m.dayEnd, displayedComponents: .hourAndMinute)
+                    Picker("Menu shows", selection: $m.menuStyle) {
+                        Text("Quick focus and my blocks").tag("both")
+                        Text("Quick focus only").tag("quick")
+                        Text("My blocks only").tag("blocks")
+                    }
                 }
-                Picker("Only between", selection: $m.activeFrom) { ForEach(5..<14) { h in Text(hourLabel(h)).tag(h) } }
-                Picker("and", selection: $m.activeTo) { ForEach(16..<25) { h in Text(hourLabel(h % 24)).tag(h) } }
             }
         }
         .formStyle(.grouped)
@@ -331,6 +339,7 @@ struct AITab: View {
                 if m.needsKey {
                     Section {
                         SecureField(m.hasKey ? "Saved in Keychain. Paste a new key to replace it" : "Paste your API key", text: $m.apiKeyDraft)
+                            .onSubmit { m.save() }
                         if m.hasKey {
                             Button("Remove saved key", role: .destructive) { Keychain.set(nil); m.hasKey = false }
                         }
@@ -366,31 +375,21 @@ struct DistractionsTab: View {
     var body: some View {
         Form {
             Section {
-                Picker("Distracting apps", selection: $m.blocking) {
-                    Text("Nudge only").tag("nudge")
-                    Text("Cover").tag("cover")
-                    Text("Hard").tag("hard")
+                Picker("During a focus block", selection: $m.blocking) {
+                    Text("Nudge me").tag("nudge")
+                    Text("Cover it").tag("cover")
+                    Text("Cover, no passes").tag("hard")
                 }
                 .pickerStyle(.segmented)
-                Toggle("Play a sound when something gets covered", isOn: $m.coverSound)
-            } header: { Text("Blocking") } footer: {
+            } footer: {
                 Text(m.blocking == "nudge"
-                     ? "Distracting apps only get a nudge in the notch. Sites below, and strict blocks, still get covered."
+                     ? "Distracting sites and apps get a nudge in the notch."
                      : m.blocking == "hard"
-                     ? "During a focus block, distracting apps and sites get covered, with no \"Give me 5 min\"."
-                     : "During a focus block, distracting apps and sites get covered. \"Give me 5 min\" unlocks after \(Int(Engine.snoozeWait)) seconds, \(Engine.snoozesPerBlock) times per block.")
+                     ? "Distracting sites and apps get covered, with no \"Give me 5 min\"."
+                     : "Distracting sites and apps get covered. \"Give me 5 min\" unlocks after \(Int(Engine.snoozeWait)) seconds, \(Engine.snoozesPerBlock) times per block. The tab stays open underneath.")
             }
-            Section {
-                TokenList(items: $m.blockSites, placeholder: "e.g. youtube.com")
-            } header: { Text("Cover these sites during a block") } footer: {
-                Text("A cover goes over the page; the tab stays open so you don't lose your place.")
-            }
-            Section("Count as drifting") { TokenList(items: $m.distractingSites, placeholder: "e.g. reddit.com") }
-            Section {
-                TokenList(items: $m.distractingApps, placeholder: "e.g. Discord")
-            } header: { Text("Distracting apps") } footer: {
-                Text(m.blocking == "nudge" ? "Count as drifting during a block." : "Covered during a focus block, unless the block lists them as on task.")
-            }
+            Section("Distracting sites") { TokenList(items: $m.distractingSites, placeholder: "e.g. youtube.com") }
+            Section("Distracting apps") { TokenList(items: $m.distractingApps, placeholder: "e.g. Discord") }
             Section {
                 TokenList(items: $m.alwaysOkApps, placeholder: "e.g. Spotify")
             } header: { Text("Always fine") } footer: { Text("Never counted as drifting or covered, in any block.") }

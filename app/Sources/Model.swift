@@ -16,8 +16,7 @@ enum Paths {
         if !fm.fileExists(atPath: d.appendingPathComponent("config.json").path) {
             // First launch: copy data from an older install (the app used to be called Focus), else start from the
             // example config. The old folder is left in place.
-            let legacy = [support.appendingPathComponent("Focus"),
-                          fm.homeDirectoryForCurrentUser.appendingPathComponent("projects/focus-coach")]
+            let legacy = [support.appendingPathComponent("Focus")]
             if let old = legacy.first(where: { fm.fileExists(atPath: $0.appendingPathComponent("config.json").path) }) {
                 for f in ["config.json", "todos.json", "state.json", "log.jsonl"] {
                     try? fm.copyItem(at: old.appendingPathComponent(f), to: d.appendingPathComponent(f))
@@ -92,6 +91,11 @@ struct Config: Codable {
     var menu_style: String? = "both"   // what "Start" shows in the menu: both | quick | blocks
     var blocking: String? = "cover"    // distracting apps during a focus block: nudge | cover | hard (cover, no "Give me 5 min")
     var cover_sound: Bool? = true      // a soft sound when a cover goes up
+    var stats_goal: Int? = 25          // focused minutes for a day to count toward the streak
+    var stats_week_goal: Int? = 5      // days a week you want to hit that
+    var sounds: Bool? = true           // soft sounds: block start, check-ins, goal reached
+    var check_ins: Bool? = true        // "halfway" and "1 minute left" drop out of the notch (no sound, no card)
+    var streak_reminder: String? = "20:00"   // one evening nudge if today hasn't counted yet; "" turns it off
     var aiOn: Bool { !["", "none"].contains(ai?.provider ?? "none") }
 
     static func load() -> Config? {

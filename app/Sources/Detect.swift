@@ -29,11 +29,28 @@ enum Detect {
         return err == nil ? r.stringValue : nil
     }
 
+    /// Apps whose AppleScript access was turned off in System Settings (error -1743), so the menu can say so.
+    private static let lock = NSLock()
+    private static var _denied = Set<String>()
+    static var denied: Set<String> { lock.lock(); defer { lock.unlock() }; return _denied }
+    private static func note(_ app: String, denied d: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if d { _denied.insert(app) } else { _denied.remove(app) }
+    }
+    /// Like osa(), but remembers whether macOS refused access to `app`.
+    static func osa(_ src: String, app: String) -> String? {
+        var err: NSDictionary?
+        guard let s = NSAppleScript(source: src) else { return nil }
+        let r = s.executeAndReturnError(&err)
+        note(app, denied: (err?[NSAppleScript.errorNumber] as? Int) == -1743)
+        return err == nil ? r.stringValue : nil
+    }
+
     static func browserTab(_ app: String) -> (String, String) {
         let src = browsers[app] == "safari"
             ? "tell application \"Safari\" to return (URL of current tab of front window) & \"\\n\" & (name of current tab of front window)"
             : "tell application \"\(app)\" to return (URL of active tab of front window) & \"\\n\" & (title of active tab of front window)"
-        guard let out = osa(src) else { return ("", "") }
+        guard let out = osa(src, app: app) else { return ("", "") }
         let parts = out.split(separator: "\n", maxSplits: 1).map(String.init)
         return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
     }

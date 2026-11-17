@@ -7,18 +7,20 @@ final class Planner {
     static let shared = Planner()
     private var window: KeyPanel?
 
-    func open() {
+    func open(tab: PlannerTab = .plan) {
         Engine.shared.card = nil      // one thing at a time
+        Engine.shared.statsShown = false
+        Engine.shared.plannerTab = tab
         Engine.shared.reloadTodos()
         if let w = window { w.show(); return }
-        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 600, height: 720),
+        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 820, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
-        w.minSize = NSSize(width: 460, height: 480)
-        w.contentView = NSHostingView(rootView: PlannerView().environmentObject(Engine.shared))
+        w.minSize = NSSize(width: 680, height: 500)
+        w.contentView = NSHostingView(rootView: MainView().environmentObject(Engine.shared))
         w.center()
         window = w
         w.show()
@@ -42,6 +44,7 @@ final class KeyPanel: NSPanel {
     func show() { orderFrontRegardless(); makeKey() }
 }
 
+
 struct PlannerView: View {
     @EnvironmentObject var e: Engine
     @State private var text = ""
@@ -57,10 +60,14 @@ struct PlannerView: View {
             VisualEffect(material: .underWindowBackground)
             VStack(spacing: 0) {
                 header
-                if hasPlan { timeline } else { empty }
-                if !e.backlog.isEmpty { backlogSection }
-                ManualAdd().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 8)
-                composer
+                if e.plannerTab == .stats {
+                    StatsView()
+                } else {
+                    if hasPlan { timeline } else { empty }
+                    if !e.backlog.isEmpty { backlogSection }
+                    ManualAdd().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 8)
+                    composer
+                }
             }
         }
         .frame(minWidth: 460, minHeight: 480)
@@ -95,8 +102,6 @@ struct PlannerView: View {
                 }
             } label: { Label("Start a block", systemImage: "timer") }
                 .menuStyle(.borderlessButton).fixedSize()
-            Button { SettingsWindow.shared.open() } label: { Image(systemName: "gearshape") }.help("Settings")
-            Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }.help("Quit lockin")
         }
         .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(.secondary)
         .frame(height: 22)
@@ -106,10 +111,10 @@ struct PlannerView: View {
         HStack(alignment: .lastTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(dateLine).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
-                Text("Plan my day").font(.system(size: 26, weight: .bold)).tracking(-0.4)
+                Text(e.plannerTab == .stats ? "Your focus" : "Today").font(.system(size: 26, weight: .bold)).tracking(-0.4)
             }
             Spacer()
-            if hasPlan { summary }
+            if hasPlan && e.plannerTab == .plan { summary }
         }
     }
 
@@ -264,7 +269,7 @@ struct PlannerView: View {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles").foregroundStyle(.tertiary)
                 Text("Want to plan by chatting instead? Turn on the AI planner in Settings.").foregroundStyle(.tertiary)
-                Button("Settings…") { SettingsWindow.shared.open() }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                Button("Set it up") { e.plannerTab = .ai }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
                 Spacer()
                 if hasPlan { Button("Clear day") { e.clearDay() }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }

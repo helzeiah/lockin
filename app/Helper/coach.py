@@ -87,7 +87,7 @@ def deadlines(days=7):
         (now.isoformat(timespec="minutes"), (now + dt.timedelta(days=days)).isoformat(timespec="minutes"))).fetchall()
 
 
-CALEVENTS = Path(os.environ.get("FOCUS_CALEVENTS") or ROOT / "bin" / "calevents")
+CALEVENTS = Path(os.environ.get("FOCUS_CALEVENTS") or ROOT / "calevents")
 FIXED_HINTS = ("room", "class", "lecture", "lab", "exam", "midterm", "gym", "meeting", "interview", "appointment")
 
 

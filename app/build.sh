@@ -35,8 +35,8 @@ compile() {  # output, swiftc args...
 }
 echo "compiling lockin (${ARCHS[*]})..."
 compile "$APP/Contents/MacOS/lockin" -parse-as-library app/Sources/*.swift
-compile "$APP/Contents/Resources/calevents" bin/calevents.swift
-cp coach.py ai.py config.example.json "$APP/Contents/Resources/"
+compile "$APP/Contents/Resources/calevents" app/Helper/calevents.swift
+cp app/Helper/coach.py app/Helper/ai.py config.example.json "$APP/Contents/Resources/"
 [[ -f app/AppIcon.icns ]] && cp app/AppIcon.icns "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PL

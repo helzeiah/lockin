@@ -24,6 +24,10 @@ counts that as drifting too, unless you said you'd be working on paper.
 
 ## What it does
 
+- **One-time setup.** The first launch walks you through it once, like Opal or
+  ScreenZen: tap what distracts you, pick how strict lockin is, allow every
+  macOS permission from one screen, and set a daily goal. If a permission gets
+  turned off later, the menu says so and links straight back to it.
 - **Lives in the notch.** A small pill wraps the camera housing: a progress ring
   on the left, time remaining on the right. It's sized from the real notch
   geometry and follows whichever screen your mouse is on. Macs without a notch
@@ -49,12 +53,20 @@ counts that as drifting too, unless you said you'd be working on paper.
   you go ("free at 8 now", "finished the stats hw"). Click any to-do to change
   its name, block, length or start time yourself. Stop a block early and
   the next start picks up with only the time that's left.
+- **Shows your streak.** A stats tab with today, this week, a 14-day bar chart and
+  a GitHub-style grid of every day since you started (empty squares are missed
+  days). A day counts once you hit 25 focused minutes; the weekly goal is 5 days.
+  A quick version drops out of the notch from the menu.
+- **Checks in without nagging.** Halfway and in the last minute, one line drops
+  out of the notch and disappears. Finishing the block that makes today count
+  gets its own card and sound. If today hasn't counted by 8pm, you get one
+  reminder, then nothing until tomorrow.
 - **Keeps the day moving.** A morning plan the first time you sit down, a
   gentle "up next" when no timer is running, and an evening recap of focused
   time, finished blocks and your biggest distractions. Unfinished to-dos roll
   into a "from earlier" list instead of nagging you.
 - **Scriptable.** `lockin://start?block=Study&minutes=25`, `lockin://next`,
-  `lockin://stop` and friends work from Shortcuts, Raycast or a terminal.
+  `lockin://stop`, `lockin://setup` and friends work from Shortcuts, Raycast or a terminal.
 
 <br>
 
@@ -162,16 +174,23 @@ always-fine apps are never covered.
 ## How it works
 
 ```
-app/Sources/          SwiftUI menu-bar app (no Xcode project, built with swiftc)
-  Engine.swift          the timer, drift detection loop, nudges, plan/recap cards
-  Detect.swift          front app, browser tab (AppleScript), terminal folder, idle time
-  Island.swift          the notch pill: reads notch geometry, follows the active screen
-  Blocker.swift         the blurred cover over distracting tabs and apps
-  Planner.swift         the "Plan my day" window: timeline, manual add, AI chat
-  Settings.swift        settings window
-coach.py              helper: morning plan, recap, soonest-slot finder, AI planner
-ai.py                 one function, ask_json(): Claude Code / Claude API / OpenAI / compatible
-bin/calevents.swift   tiny EventKit reader that prints today's events as JSON
+app/Sources/           SwiftUI menu-bar app (no Xcode project, built with swiftc)
+  App.swift              entry point, lockin:// links
+  Engine.swift           the timer, drift detection loop, check-ins, nudges, cards
+  Detect.swift           front app, browser tab (AppleScript), terminal folder, idle time
+  Island.swift           the notch: reads notch geometry, follows the active screen
+  MenuBar.swift          the menu-bar dropdown
+  MainWindow.swift       the lockin window: sidebar with Today, Stats and setup pages
+  Planner.swift          the Today page: timeline, manual add, AI chat
+  Stats.swift            streaks, daily totals and the charts (read from log.jsonl)
+  Blocker.swift          the blurred cover over distracting tabs and apps
+  Setup.swift            the one-time setup window and live permission checks
+  Settings.swift         setup pages: blocks, distractions, AI, general (save as you edit)
+app/Helper/            bundled into the app's Resources
+  coach.py               morning plan, recap, soonest-slot finder, AI planner
+  ai.py                  one function, ask_json(): Claude Code / Claude API / OpenAI / compatible
+  calevents.swift        tiny EventKit reader that prints today's events as JSON
+app/build.sh           build, sign, install (or --release for a universal zip)
 ```
 
 Every couple of seconds the engine looks at what's in front of you and
