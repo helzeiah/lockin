@@ -27,9 +27,13 @@ final class Planner {
     }
 }
 
-/// A regular-looking window that never activates the app. Activating an accessory app swaps the menu bar to its
-/// own menus, and on a notched Mac with a full menu bar macOS then hides status items, the lockin icon included.
-/// It still becomes key, so text fields, popovers and keyboard shortcuts work.
+/// A regular-looking window that opens without activating the app, and activates it only while you type.
+///
+/// Clicking into a text field makes lockin the frontmost app, because dictation apps (Spokenly, Superwhisper, ...)
+/// and other assistive tools insert text into the *frontmost* app; otherwise they'd type into the app behind lockin.
+/// Activating an accessory app normally swaps the menu bar to its own menus, and on a notched Mac with a full menu bar
+/// macOS then hides status items, lockin's icon included. So the main menu is empty (`minimalMainMenu`) and this
+/// window handles ⌘X/C/V/A/Z, ⌘W and ⌘Q itself. When the last lockin window closes, the app you were in comes back.
 final class KeyPanel: NSPanel {
     override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: styleMask.union(.nonactivatingPanel), backing: backing, defer: flag)
@@ -42,6 +46,56 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     func show() { orderFrontRegardless(); makeKey() }
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let ok = super.makeFirstResponder(responder)
+        if ok, responder is NSText || responder is NSTextField { TypingFocus.begin() }
+        return ok
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        var action: Selector?
+        switch (mods, key) {
+        case (.command, "x"): action = #selector(NSText.cut(_:))
+        case (.command, "c"): action = #selector(NSText.copy(_:))
+        case (.command, "v"): action = #selector(NSText.paste(_:))
+        case (.command, "a"): action = #selector(NSText.selectAll(_:))
+        case (.command, "z"): action = Selector(("undo:"))
+        case ([.command, .shift], "z"): action = Selector(("redo:"))
+        case (.command, "w"): action = #selector(NSWindow.performClose(_:))
+        case (.command, "q"): action = #selector(NSApplication.terminate(_:))
+        default: break
+        }
+        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func close() {
+        super.close()
+        TypingFocus.end()
+    }
+}
+
+/// Makes lockin the frontmost app while you type in its windows, then gives the front back to the app you were in.
+@MainActor
+enum TypingFocus {
+    private static var previous: NSRunningApplication?
+
+    static func begin() {
+        guard !NSApp.isActive else { return }
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid() { previous = front }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    static func end() {
+        DispatchQueue.main.async {
+            guard !NSApp.windows.contains(where: { $0 is KeyPanel && $0.isVisible }) else { return }
+            if NSApp.isActive { previous?.activate() }
+            previous = nil
+        }
+    }
 }
 
 

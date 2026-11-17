@@ -66,25 +66,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Just enough menu for the windows: an app menu (close, quit) and Edit, so ⌘C/⌘V/⌘A/⌘Z work in text fields.
-/// The windows don't activate the app, so this only shows if something else does.
-@MainActor func minimalMainMenu() -> NSMenu {
-    let main = NSMenu()
-    func submenu(_ title: String, _ items: [NSMenuItem]) {
-        let m = NSMenu(title: title); items.forEach(m.addItem)
-        let holder = NSMenuItem(title: title, action: nil, keyEquivalent: ""); holder.submenu = m
-        main.addItem(holder)
-    }
-    func item(_ t: String, _ a: Selector, _ k: String, _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
-        let i = NSMenuItem(title: t, action: a, keyEquivalent: k); i.keyEquivalentModifierMask = mods; return i
-    }
-    submenu(selfAppName, [item("Close Window", #selector(NSWindow.performClose(_:)), "w"), .separator(),
-                          item("Quit \(selfAppName)", #selector(NSApplication.terminate(_:)), "q")])
-    submenu("Edit", [item("Undo", Selector(("undo:")), "z"), item("Redo", Selector(("redo:")), "z", [.command, .shift]), .separator(),
-                     item("Cut", #selector(NSText.cut(_:)), "x"), item("Copy", #selector(NSText.copy(_:)), "c"),
-                     item("Paste", #selector(NSText.paste(_:)), "v"), item("Select All", #selector(NSText.selectAll(_:)), "a")])
-    return main
-}
+/// No menus at all. lockin becomes the frontmost app while you type in its windows (so dictation apps find it), and
+/// any menus would then take menu-bar space; on a notched Mac that makes macOS hide status items, lockin's icon
+/// included. With an empty main menu only the Apple menu shows. `KeyPanel` handles ⌘X/C/V/A/Z, ⌘W and ⌘Q itself.
+@MainActor func minimalMainMenu() -> NSMenu { NSMenu() }
 
 // Close the menu-bar popover (it's the key window while open).
 // Only the dropdown: the icon itself lives in a menu-bar-height status window (NSStatusBarWindow on macOS 15), and
