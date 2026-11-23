@@ -1,241 +1,89 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="lockin icon"></p>
+<p align="center"><img src="docs/icon.png" width="112" alt="lockin icon"></p>
 
-# lockin
-
-A focus timer for macOS that lives in the notch, notices the moment you drift
-off task, and plans your day around your calendar. It works fully offline;
-there's an optional AI planner if you want one (your Claude subscription, your
-own API key, or a local model).
-
-It's built for the gap between "I should work on this" and actually doing it:
-start a block, and the timer sits in the notch where you can't miss it. Wander
-onto YouTube and a cover slides over the page. Leave for ten minutes and it
-counts that as drifting too, unless you said you'd be working on paper.
+<h1 align="center">lockin</h1>
 
 <p align="center">
-  <img src="docs/menu.png" width="250" alt="Menu: quick focus, saved blocks, up next">
-  &nbsp;
-  <img src="docs/planner.png" width="330" alt="Plan my day: a timed plan with an AI chat">
-  &nbsp;
-  <img src="docs/blocker.png" width="330" alt="The cover that appears over an app outside the block">
+  <b>Plan your day first thing. Hard-block everything else. Keep the streak.</b><br>
+  An accountability app for macOS that lives in the notch.
 </p>
 
-<br>
+<p align="center">
+  <a href="https://github.com/helzeiah/lockin/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/helzeiah/lockin?label=download&color=36D67A"></a>
+  <a href="https://github.com/helzeiah/lockin/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/helzeiah/lockin/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111?logo=apple">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-111"></a>
+</p>
+
+<p align="center"><img src="docs/morning.png" width="820" alt="The morning screen: today's plan, your streak, and a button to lock in"></p>
 
 ## What it does
 
-- **One-time setup.** The first launch walks you through it once, like Opal or
-  ScreenZen: tap what distracts you, pick how strict lockin is, allow every
-  macOS permission from one screen, and set a daily goal. If a permission gets
-  turned off later, the menu says so and links straight back to it.
-- **Lives in the notch.** A small pill wraps the camera housing: a progress ring
-  on the left, time remaining on the right. It's sized from the real notch
-  geometry and follows whichever screen your mouse is on. Macs without a notch
-  get the same pill under the menu bar.
-- **Quick focus.** Pick a length and the apps you'll use. Anything else you
-  open gets covered until the timer ends. No setup needed.
-- **Knows when you drift.** Each focus block lists the apps, sites and project
-  folders that count as on task. lockin checks the front app, the open browser
-  tab, and even which folder your terminal's Claude Code session is in. After
-  30 seconds off task it nudges you; after a few minutes away from the Mac it
-  counts that too (or doesn't, for blocks marked "offline is fine").
-- **Covers distractions.** During a focus block, YouTube/Reddit/etc. and
-  distracting apps (Discord, Steam...) get a blurred cover with *Back to work*,
-  *Close tab* or *Hide app*, and *Give me 5 min*. The tab stays open and the app
-  keeps running, so you don't lose your place. Like ScreenZen, the 5-minute pass
-  only unlocks after a 10-second countdown and runs out after two per block (or
-  never shows, on **Hard**). Turn on **Only allow these apps and sites** for a
-  block and *everything* outside its list gets covered. Breaks are never covered.
-- **Plans your day, by hand or with AI.** Add blocks yourself and lockin fills in
-  the **soonest open time**, working around your calendar and what's already
-  planned. Or type a messy brain dump ("stats hw, gym at 6, finish the essay
-  intro") and the AI planner turns it into a timed schedule, then edits it as
-  you go ("free at 8 now", "finished the stats hw"). Click any to-do to change
-  its name, block, length or start time yourself. Stop a block early and
-  the next start picks up with only the time that's left.
-- **Shows your streak.** A stats tab with today, this week, a 14-day bar chart and
-  a GitHub-style grid of every day since you started (empty squares are missed
-  days). A day counts once you hit 25 focused minutes; the weekly goal is 5 days.
-  A quick version drops out of the notch from the menu.
-- **Checks in without nagging.** Halfway and in the last minute, one line drops
-  out of the notch and disappears. Finishing the block that makes today count
-  gets its own card and sound. If today hasn't counted by 8pm, you get one
-  reminder, then nothing until tomorrow.
-- **Keeps the day moving.** A morning plan the first time you sit down, a
-  gentle "up next" when no timer is running, and an evening recap of focused
-  time, finished blocks and your biggest distractions. Unfinished to-dos roll
-  into a "from earlier" list instead of nagging you.
-- **Scriptable.** `lockin://start?block=Study&minutes=25`, `lockin://next`,
-  `lockin://stop`, `lockin://setup` and friends work from Shortcuts, Raycast or a terminal.
+- **Your day comes first.** The first time you use your Mac each day, your plan covers the screen. Lock in on the
+  first session or start your day. Skipping takes a 3-second hold and a reason, and it goes on the record.
+- **Plan in one line.** Type `leetcode 45, essay intro 30 at 2pm` and lockin times it around your calendar. No AI
+  needed. An optional AI planner (your Claude subscription, an API key, or a local model) can rework the day for you.
+- **A block that holds.** A session allows only the few apps it needs, picked from the task's words. Everything else
+  gets covered, and in Locked mode it gets hidden. The cover takes the keyboard too, so there's no typing around it.
+- **Earn your free time.** YouTube, games and the rest stay covered until today's goal is met. Then they're yours.
+- **Accountability you can see.** Streaks, a year of history, and an honest record: sessions kept vs. ended early,
+  mornings skipped, passes taken. Planned sessions start on their own, and calendar events ask before they lock you in.
 
-<br>
-
-## Requirements
-
-- macOS 14 (Sonoma) or later, Apple silicon or Intel
-- Nothing else for the app itself. The helper script runs on the Python that
-  ships with macOS.
-
-<br>
+<p align="center">
+  <img src="docs/today.png" width="410" alt="Today: timed sessions with the apps each one allows">
+  &nbsp;
+  <img src="docs/cover.png" width="410" alt="The cover over a distracting site during a session">
+</p>
+<p align="center"><img src="docs/stats.png" width="560" alt="Stats: streak, last 14 days, a year of history and the week on the record"></p>
 
 ## Install
-
-**Download** (no Xcode needed):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/helzeiah/lockin/main/install.sh | bash
 ```
 
-That puts `lockin.app` in `~/Applications` and opens it. A target icon appears
-in the menu bar. You can also grab `lockin.zip` from the
-[latest release](https://github.com/helzeiah/lockin/releases/latest), unzip it,
-and drag the app into Applications. The first time, right-click it and choose
-**Open** (the app isn't notarized, so macOS asks once).
+That checks the download against its published SHA-256, puts `lockin.app` in `~/Applications` and opens it. You can
+also download `lockin.zip` from the [latest release](https://github.com/helzeiah/lockin/releases/latest). The app
+isn't notarized, so the first time, right-click it and choose **Open**.
 
-**Build from source** (needs the Xcode Command Line Tools: `xcode-select --install`):
-
-```bash
-git clone https://github.com/helzeiah/lockin.git
-cd lockin
-./app/build.sh
-```
-
-<br>
+Requires macOS 14 (Sonoma) or later, on Apple silicon or Intel. A two-minute setup walks you through it: the apps you
+work in, what distracts you, how strict to be, permissions, and a daily goal.
 
 ## Permissions
 
-macOS asks for these the first time they're needed:
-
 | Permission | Why |
 |---|---|
-| **Automation** (your browser, Terminal/iTerm) | To read the current tab's URL and title, and the terminal's folder. Nothing is stored. |
-| **Calendar** | To plan around today's events. Read-only. |
+| **Automation** (your browser, optionally iTerm) | To see the open tab, so YouTube gets covered and your docs don't. And the folder of a Claude Code session, if a task rule asks for one. |
+| **Calendar** (optional) | To show today's events on your plan and offer to lock in when one starts. Read-only. |
+| **Login item** (optional) | So the morning screen is there without remembering to open lockin. |
 
-Both are optional. Without them, drift detection falls back to app names, and
-planning ignores your calendar.
+## Privacy
 
-**Don't see the icon?** On notched Macs with a crowded menu bar, macOS hides
-icons that don't fit. Hold ⌘ and drag other icons out of the way, or open
-`lockin.app` again to get the planner, which has the same controls (start a
-block, settings, quit).
+Everything stays on your Mac, in `~/Library/Application Support/lockin`. There are no accounts and no analytics.
+The optional AI planner sends only your plan, today's event titles and what you type, to the provider you pick.
+API keys live in the macOS Keychain.
 
-<br>
+## Build from source
 
-## The AI planner (optional)
-
-Pick one in **Settings → AI planner**, or leave it on *None*:
-
-| Option | What you need |
-|---|---|
-| **Claude Code** | The `claude` CLI, signed in with a Claude subscription. No key. |
-| **Claude API key** | A key from [console.anthropic.com](https://console.anthropic.com). Default model: `claude-opus-5-5`. |
-| **OpenAI API key** | A key from [platform.openai.com](https://platform.openai.com). |
-| **Other** | Any OpenAI-compatible endpoint: [OpenRouter](https://openrouter.ai), Gemini, Groq, or a local model through [Ollama](https://ollama.com) / LM Studio (no key, nothing leaves your Mac). |
-
-Keys are stored in your **macOS Keychain**, never in a file. **Save and test**
-checks the connection. The planner only sees your to-dos, today's calendar
-event titles, and what you type to it.
-
-<br>
-
-## Setting up your blocks
-
-Open **Settings → Focus blocks**. Each block has:
-
-- a default length
-- **on-task websites** and **apps** (case-insensitive substring match, so
-  `leetcode` covers every LeetCode page)
-- **Claude Code project folders** that count as on task
-- whether **time away from the Mac** counts as focus (for reading, paper or
-  iPad work)
-- whether the **terminal** counts as on task
-- **Only allow these apps and sites**: cover anything outside the list
-
-**General → Menu shows** switches the menu between quick focus, your saved
-blocks, or both.
-
-**Distractions** sets the sites that get covered, the apps and sites that count
-as drifting, and the apps that are always fine (Spotify, Finder...). Its
-**Blocking** setting decides what happens to distracting apps during a focus
-block:
-
-| Blocking | Distracting apps | *Give me 5 min* |
-|---|---|---|
-| **Nudge only** | a nudge in the notch | any time, as often as you like |
-| **Cover** (default) | covered, like distracting sites | after a 10 s countdown, twice per block |
-| **Hard** | covered | never |
-
-**Play a sound when something gets covered** (on by default) plays a soft
-system sound, at most every 30 seconds. lockin itself, macOS's own UI and your
-always-fine apps are never covered.
-
-<br>
-
-## How it works
-
-```
-app/Sources/           SwiftUI menu-bar app (no Xcode project, built with swiftc)
-  App.swift              entry point, lockin:// links
-  Engine.swift           the timer, drift detection loop, check-ins, nudges, cards
-  Detect.swift           front app, browser tab (AppleScript), terminal folder, idle time
-  Island.swift           the notch: reads notch geometry, follows the active screen
-  MenuBar.swift          the menu-bar dropdown
-  MainWindow.swift       the lockin window: sidebar with Today, Stats and setup pages
-  Planner.swift          the Today page: timeline, manual add, AI chat
-  Stats.swift            streaks, daily totals and the charts (read from log.jsonl)
-  Blocker.swift          the blurred cover over distracting tabs and apps
-  Setup.swift            the one-time setup window and live permission checks
-  Settings.swift         setup pages: blocks, distractions, AI, general (save as you edit)
-app/Helper/            bundled into the app's Resources
-  coach.py               morning plan, recap, soonest-slot finder, AI planner
-  ai.py                  one function, ask_json(): Claude Code / Claude API / OpenAI / compatible
-  calevents.swift        tiny EventKit reader that prints today's events as JSON
-app/build.sh           build, sign, install (or --release for a universal zip)
-```
-
-Every couple of seconds the engine looks at what's in front of you and
-compares it to the active block's rules. Being off task starts a grace timer;
-when it runs out you get a nudge in the notch, and repeated drift gets
-re-nudged on an interval. The AI planner asks for JSON that matches a schema
-(structured outputs on the Claude and OpenAI APIs, with a plain-JSON fallback
-for servers that don't support schemas), so the reply always drops straight
-into the plan.
-
-Your data stays in `~/Library/Application Support/lockin`: `config.json`
-(settings), `todos.json` (today's plan and backlog), `log.jsonl` (focus history
-for the recap) and `state.json` (the running block, so a restart doesn't lose
-it).
-
-<br>
-
-## Development
+Needs the Xcode Command Line Tools (`xcode-select --install`). No Xcode project.
 
 ```bash
-./app/build.sh             # build for this Mac, install to ~/Applications, restart it
-./app/build.sh --release   # universal build + dist/lockin.zip
-swift app/make-icon.swift  # redraw the app icon
+git clone https://github.com/helzeiah/lockin.git && cd lockin
+./app/build.sh             # build, install to ~/Applications, restart it
+./app/test.sh              # plan parser, app logic (headless) and helper tests
+./app/build.sh --release   # universal build + dist/lockin.zip and its checksum
 ```
 
-Pushing a `v*` tag builds a universal release and attaches `lockin.zip` to a
-GitHub release (`.github/workflows/release.yml`).
+`app/Sources` is the SwiftUI app. `Engine.swift` holds sessions, covers and the daily loop. `Gate.swift` is the
+morning screen, `Planner.swift` is Today, `PlanParser.swift` reads the one-line plans, and `Match.swift` picks each
+task's apps. `app/Helper` has the Python helper for the AI planner, the recap and free time slots. It runs on the
+Python that ships with macOS. Pushing a `v*` tag builds a release.
 
-**Tip:** macOS ties permissions to the app's signature, and the default ad-hoc
-signature changes on every build, so you'd re-approve Calendar/Automation each
-time. Make a free local signing certificate once: *Keychain Access → Certificate
-Assistant → Create a Certificate…*, name it `lockin Local Signing`, type *Code
-Signing*. `build.sh` uses it automatically.
+macOS ties permissions to the app's signature. To keep them across rebuilds, create a free local code-signing
+certificate named `lockin Local Signing` (Keychain Access → Certificate Assistant → Create a Certificate…).
+`build.sh` uses it automatically.
 
-<br>
-
-## Uninstall
-
-Quit lockin from its menu, then:
-
-```bash
-rm -rf ~/Applications/lockin.app ~/Library/Application\ Support/lockin
-```
-
-<br>
+It's scriptable too: `lockin://start?task=Essay&minutes=25`, `lockin://next`, `lockin://stop`, `lockin://plan`,
+and `lockin://tomorrow` work from Shortcuts, Raycast or a terminal.
 
 ## License
 
