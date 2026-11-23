@@ -47,11 +47,22 @@ final class KeyPanel: NSPanel {
     override var canBecomeMain: Bool { true }
     func show() { orderFrontRegardless(); makeKey() }
 
+    private var editingText: Bool { firstResponder is NSText || firstResponder is NSTextField }
+
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let ok = super.makeFirstResponder(responder)
-        if ok, responder is NSText || responder is NSTextField { TypingFocus.begin() }
+        if ok, editingText { TypingFocus.begin() }
         return ok
     }
+
+    // Clicking back into a field that already had focus doesn't change the first responder, so also catch the click.
+    override func sendEvent(_ event: NSEvent) {
+        super.sendEvent(event)
+        if event.type == .leftMouseDown || event.type == .keyDown, editingText { TypingFocus.begin() }
+    }
+
+    // A non-activating panel reports itself as a system dialog; some tools skip those. It's a normal window here.
+    override func accessibilitySubrole() -> NSAccessibility.Subrole? { .standardWindow }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
@@ -79,11 +90,14 @@ final class KeyPanel: NSPanel {
 }
 
 /// Makes lockin the frontmost app while you type in its windows, then gives the front back to the app you were in.
+/// While typing it's also a regular app (Dock icon, ⌘-Tab): dictation apps like Spokenly ignore accessory apps when
+/// deciding which app you're in. The menu bar stays empty either way, so no status items get pushed off.
 @MainActor
 enum TypingFocus {
     private static var previous: NSRunningApplication?
 
     static func begin() {
+        if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
         guard !NSApp.isActive else { return }
         if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid() { previous = front }
         NSApp.activate(ignoringOtherApps: true)
@@ -94,6 +108,7 @@ enum TypingFocus {
             guard !NSApp.windows.contains(where: { $0 is KeyPanel && $0.isVisible }) else { return }
             if NSApp.isActive { previous?.activate() }
             previous = nil
+            if NSApp.activationPolicy() != .accessory { NSApp.setActivationPolicy(.accessory) }
         }
     }
 }
