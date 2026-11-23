@@ -108,9 +108,11 @@ struct MenuContent: View {
                 }
             }
             HStack(spacing: 6) {
-                AppIconRow(apps: e.cfg.lockin_apps ?? [], size: 14, max: 7)
+                AppIconRow(apps: e.cfg.lockin_apps ?? [], size: 14, max: 5)
                 Text((e.cfg.lockin_apps ?? []).isEmpty ? "Pick your lock-in apps in Setup" : "Everything else gets covered")
                     .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
