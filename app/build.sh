@@ -53,12 +53,14 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleVersion</key><string>$VERSION</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_OS</string>
 <key>LSUIElement</key><true/>
+<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+<key>NSHumanReadableCopyright</key><string>MIT License. github.com/helzeiah/lockin</string>
 <key>NSSupportsAutomaticTermination</key><false/>
 <key>NSSupportsSuddenTermination</key><false/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>lockin</string><key>CFBundleURLSchemes</key><array><string>lockin</string></array></dict></array>
 <key>NSAppleEventsUsageDescription</key><string>lockin checks which tab is open in your browser and terminal so it can tell when you drift.</string>
-<key>NSCalendarsFullAccessUsageDescription</key><string>lockin reads today's events so it can plan around them.</string>
-<key>NSCalendarsUsageDescription</key><string>lockin reads today's events so it can plan around them.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>lockin shows your events on your plan and offers to lock in when one starts. It never changes your calendar.</string>
+<key>NSCalendarsUsageDescription</key><string>lockin shows your events on your plan and offers to lock in when one starts. It never changes your calendar.</string>
 </dict></plist>
 PL
 
@@ -73,8 +75,8 @@ codesign --force -s "$SIGN" -i "$BUNDLE_ID.calevents" "$APP/Contents/Resources/c
 codesign --force -s "$SIGN" "$APP"
 
 if [[ $RELEASE == 1 ]]; then
-  (cd dist && rm -f lockin.zip && ditto -c -k --keepParent lockin.app lockin.zip)
-  echo "built dist/lockin.app and dist/lockin.zip (v$VERSION)"
+  (cd dist && rm -f lockin.zip lockin.zip.sha256 && ditto -c -k --keepParent lockin.app lockin.zip && shasum -a 256 lockin.zip > lockin.zip.sha256)
+  echo "built dist/lockin.app, dist/lockin.zip and its checksum (v$VERSION)"
   exit 0
 fi
 

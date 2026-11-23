@@ -1,26 +1,28 @@
 import AppKit
 import SwiftUI
 
-// "Plan my day": today's focus blocks on a timeline, added by hand or by talking to the AI planner.
+// The lockin window: Today (or Tomorrow), Stats and setup.
 @MainActor
 final class Planner {
     static let shared = Planner()
     private var window: KeyPanel?
 
-    func open(tab: PlannerTab = .plan) {
-        Engine.shared.card = nil      // one thing at a time
-        Engine.shared.statsShown = false
-        Engine.shared.plannerTab = tab
-        Engine.shared.reloadTodos()
+    func open(tab: PlannerTab = .plan, day: PlanDay? = nil) {
+        let e = Engine.shared
+        e.card = nil      // one thing at a time
+        e.statsShown = false
+        e.plannerTab = tab
+        if let day { e.planDay = day }
+        e.reloadTodos()
         if let w = window { w.show(); return }
-        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 820, height: 720),
+        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 860, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
-        w.minSize = NSSize(width: 680, height: 500)
-        w.contentView = NSHostingView(rootView: MainView().environmentObject(Engine.shared))
+        w.minSize = NSSize(width: 720, height: 520)
+        w.contentView = NSHostingView(rootView: MainView().environmentObject(e))
         w.center()
         window = w
         w.show()
@@ -34,7 +36,7 @@ final class Planner {
 /// Activating an accessory app normally swaps the menu bar to its own menus, and on a notched Mac with a full menu bar
 /// macOS then hides status items, lockin's icon included. So the main menu is empty (`minimalMainMenu`) and this
 /// window handles ⌘X/C/V/A/Z, ⌘W and ⌘Q itself. When the last lockin window closes, the app you were in comes back.
-final class KeyPanel: NSPanel {
+class KeyPanel: NSPanel {
     override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: styleMask.union(.nonactivatingPanel), backing: backing, defer: flag)
         becomesKeyOnlyIfNeeded = false
@@ -113,168 +115,113 @@ enum TypingFocus {
     }
 }
 
+// MARK: - Today
 
-struct PlannerView: View {
+struct TodayView: View {
     @EnvironmentObject var e: Engine
-    @State private var text = ""
-    @FocusState private var focused: Bool
     @State private var hoverId: String?
-    @State private var editingId: String?     // the to-do (plan or backlog) open in the inline editor
+    @State private var editingId: String?
+    @State private var backlogOpen = false
 
-    private var dateLine: String { Date().formatted(.dateTime.weekday(.wide).month(.wide).day()) }
-    private var hasPlan: Bool { !e.todos.isEmpty }
+    private var day: PlanDay { e.planDay }
+    private var items: [Todo] { e.list(day) }
+    private var dayDate: Date { day == .today ? Stats.today : tomorrowDate() }
+    private var events: [CalEvent] { day == .today ? e.events.filter { !$0.allDay } : [] }
+    private var entries: [PlanEntry] { PlanEntry.merge(todos: items, events: events) }
 
     var body: some View {
-        ZStack {
-            VisualEffect(material: .underWindowBackground)
-            VStack(spacing: 0) {
-                header
-                if e.plannerTab == .stats {
-                    StatsView()
-                } else {
-                    if hasPlan { timeline } else { empty }
-                    if !e.backlog.isEmpty { backlogSection }
-                    ManualAdd().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 8)
-                    composer
-                }
-            }
+        VStack(spacing: 0) {
+            header
+            if day == .today, e.block != nil { SessionBanner().padding(.horizontal, 22).padding(.bottom, 10) }
+            if entries.isEmpty { empty } else { timeline }
+            if day == .today && !e.backlog.isEmpty { backlogSection }
+            composer
         }
-        .frame(minWidth: 460, minHeight: 480)
-        .onAppear { focused = e.cfg.aiOn }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(VisualEffect(material: .underWindowBackground))
+        .onChange(of: e.planDay) { _, _ in editingId = nil }
     }
+
+    // MARK: header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            controls
-            titleRow
-        }
-        .padding(.horizontal, 28).padding(.top, 8).padding(.bottom, 16)
-    }
-
-    // The menu bar's core controls, in case macOS hides the icon on a crowded menu bar.
-    private var controls: some View {
-        HStack(spacing: 14) {
-            Spacer()
-            Menu {
-                let quick = e.quickApps.isEmpty ? (e.lastExternalApp.isEmpty ? [] : [e.lastExternalApp]) : e.quickApps
-                Section(quick.isEmpty ? "Quick focus" : "Quick focus: \(quick.joined(separator: ", "))") {
-                    ForEach([25, 45, 60, 90], id: \.self) { m in
-                        Button("\(m) min") { e.startQuick(minutes: m, apps: quick); NSApp.keyWindow?.close() }.disabled(quick.isEmpty)
-                    }
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(dayDate.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 18) {
+                    dayTab(.today, "Today", count: 0)
+                    dayTab(.tomorrow, "Tomorrow", count: e.tomorrow.count)
                 }
-                if !e.cfg.blocks.isEmpty {
-                    Section("My blocks") {
-                        ForEach(e.cfg.blocks) { p in
-                            Button("\(p.name) · \(p.minutes) min") { e.startBlock(p); NSApp.keyWindow?.close() }
-                        }
-                    }
-                }
-            } label: { Label("Start a block", systemImage: "timer") }
-                .menuStyle(.borderlessButton).fixedSize()
-        }
-        .buttonStyle(.plain).font(.system(size: 12.5)).foregroundStyle(.secondary)
-        .frame(height: 22)
-    }
-
-    private var titleRow: some View {
-        HStack(alignment: .lastTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(dateLine).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
-                Text(e.plannerTab == .stats ? "Your focus" : "Today").font(.system(size: 26, weight: .bold)).tracking(-0.4)
             }
             Spacer()
-            if hasPlan && e.plannerTab == .plan { summary }
+            if day == .today {
+                let st = e.stats()
+                HStack(spacing: 18) {
+                    StreakBadge(streak: st.streak)
+                    GoalRing(minutes: st.todayMinutes, goal: st.goal, size: 50)
+                }
+            }
         }
+        .padding(.horizontal, 28).padding(.top, 36).padding(.bottom, 16)
     }
 
-    private var summary: some View {
-        let open = e.todos.filter { !$0.isDone }
-        let mins = open.reduce(0) { $0 + $1.left }
-        let end = open.compactMap { t -> Date? in startDate(t).map { $0.addingTimeInterval(Double(t.minutes * 60)) } }.max()
-        return VStack(alignment: .trailing, spacing: 2) {
-            Text(open.isEmpty ? "All done" : "\(mins / 60 > 0 ? "\(mins / 60)h " : "")\(mins % 60)m left")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-            if let end { Text("done around \(end.formatted(date: .omitted, time: .shortened))").font(.system(size: 11.5)).foregroundStyle(.secondary) }
+    /// "Today  Tomorrow" as big titles; the one you're on is bright.
+    private func dayTab(_ d: PlanDay, _ title: String, count: Int) -> some View {
+        let on = day == d
+        return Button { withAnimation(.easeOut(duration: 0.15)) { e.planDay = d } } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(title).font(.system(size: 28, weight: .bold)).tracking(-0.5)
+                    .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                if !on && count > 0 {
+                    Text("\(count)").font(Theme.number(13)).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain).help(on ? "" : "Plan \(title.lowercased())")
     }
 
-    private func startDate(_ t: Todo) -> Date? {
-        guard let s = t.start, s.count >= 4 else { return nil }
-        let p = s.split(separator: ":").compactMap { Int($0) }
-        guard p.count == 2 else { return nil }
-        return Calendar.current.date(bySettingHour: p[0], minute: p[1], second: 0, of: Date())
-    }
+    // MARK: timeline
 
     private var timeline: some View {
         ScrollView {
             LazyVStack(spacing: 2) {
-                let nextId = e.nextTodo?.id
-                ForEach(e.todos) { t in
-                    if editingId == t.id { TodoEditor(t: t) { editingId = nil }.padding(.vertical, 4) }
-                    else { row(t, isNext: t.id == nextId) }
+                let nextId = day == .today ? e.nextTodo?.id : nil
+                ForEach(entries, id: \.id) { entry in
+                    switch entry {
+                    case .todo(let t):
+                        if editingId == t.id { TodoEditor(t: t, day: day) { editingId = nil }.padding(.vertical, 4) }
+                        else { TodoRow(t: t, day: day, isNext: t.id == nextId, hoverId: $hoverId, editingId: $editingId) }
+                    case .event(let ev): EventRow(ev: ev)
+                    }
                 }
             }
             .padding(.horizontal, 16).padding(.bottom, 12)
         }
     }
 
-    private func row(_ t: Todo, isNext: Bool) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            TimeButton(t: t, label: t.isDone ? "" : (startDate(t)?.formatted(date: .omitted, time: .shortened) ?? "later"))
-                .frame(width: 62, alignment: .trailing)
-            Button { e.setDone(t.id, !t.isDone) } label: {
-                ZStack {
-                    Circle().strokeBorder(t.isDone ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: 1.5)
-                    if t.isDone {
-                        Circle().fill(Color.accentColor)
-                        Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                    }
-                }
-                .frame(width: 20, height: 20)
-                .padding(4)                       // bigger target
-                .contentShape(Rectangle())        // the empty middle counts as part of the button
-            }
-            .buttonStyle(.plain)
-            .help(t.isDone ? "Mark not done" : "Mark done")
-            VStack(alignment: .leading, spacing: 3) {
-                Text(t.task).font(.system(size: 14, weight: .medium))
-                    .strikethrough(t.isDone).foregroundStyle(t.isDone ? .tertiary : .primary)
-                HStack(spacing: 8) {
-                    HStack(spacing: 5) { Circle().fill(colorFor(block: t.block)).frame(width: 7, height: 7); Text(t.block) }
-                    Text(!t.isDone && (t.spent ?? 0) > 0 ? "\(t.left) of \(t.minutes) min left" : "\(t.minutes) min")
-                    if let why = t.why, !why.isEmpty { Text(why).foregroundStyle(.tertiary) }
-                }
-                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture { editingId = t.id }      // click a to-do to edit it
-            if hoverId == t.id {
-                Button { editingId = t.id } label: { Image(systemName: "pencil").font(.system(size: 11.5)) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Edit")
-                Button { e.deleteTodo(t.id) } label: { Image(systemName: "trash").font(.system(size: 11)) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
-            }
-            if !t.isDone && (isNext || hoverId == t.id) {
-                Button("Start") { e.startTodo(t); NSApp.keyWindow?.close() }   // starting = done planning
-                    .buttonStyle(.borderedProminent).controlSize(.small).tint(isNext ? .accentColor : .gray)
-                    .transition(.opacity)
-            }
+    private var empty: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: day == .today ? "sun.max" : "moon.stars").font(.system(size: 30, weight: .light)).foregroundStyle(.secondary)
+            Text(day == .today ? "Nothing planned yet" : "Plan tomorrow tonight").font(.system(size: 16, weight: .semibold))
+            Text(day == .today ? "Type what you'll lock in on below, all in one line.\nlockin picks the times and the apps for each one."
+                               : "Whatever you add here is waiting on your morning screen,\nso the day starts with a plan instead of a blank page.")
+                .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Spacer()
         }
-        .padding(.vertical, 9).padding(.horizontal, 12)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(hoverId == t.id ? Color.primary.opacity(0.05) : .clear))
-        .onHover { hoverId = $0 ? t.id : (hoverId == t.id ? nil : hoverId) }
-        .animation(.easeOut(duration: 0.12), value: hoverId)
+        .frame(maxWidth: .infinity)
     }
 
-    @State private var backlogOpen = true
+    // MARK: backlog
+
     private func dayLabel(_ d: String?) -> String {
         guard let d, let date = DateFormatter.ymd.date(from: d) else { return "" }
-        if Calendar.current.isDateInYesterday(date) { return "yesterday" }
+        if Calendar.current.isDate(date, inSameDayAs: Calendar.current.date(byAdding: .day, value: -1, to: Stats.today) ?? date) { return "yesterday" }
         return date.formatted(.dateTime.weekday(.abbreviated))
     }
 
-    // Leftovers from earlier days: visible while planning, never nudged about.
     private var backlogSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -287,277 +234,449 @@ struct PlannerView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
-                if backlogOpen {
-                    Button("Clear") { e.clearBacklog() }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
-                }
+                if backlogOpen { Button("Clear") { e.clearBacklog() }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
             if backlogOpen {
                 ScrollView {
-                    VStack(spacing: 1) {
-                        ForEach(e.backlog) { t in
-                            if editingId == t.id { TodoEditor(t: t, backlog: true) { editingId = nil }.padding(.vertical, 3) }
-                            else { backlogRow(t) }
-                        }
-                    }
+                    VStack(spacing: 1) { ForEach(e.backlog) { t in backlogRow(t) } }
                 }
-                .frame(maxHeight: e.backlog.contains { $0.id == editingId } ? 190 : 130)   // room for the editor
+                .frame(maxHeight: 130)
             }
         }
-        .padding(.horizontal, 24).padding(.top, 6)
+        .padding(.horizontal, 26).padding(.top, 6)
     }
 
     private func backlogRow(_ t: Todo) -> some View {
         HStack(spacing: 10) {
-            Circle().fill(colorFor(block: t.block)).frame(width: 6, height: 6)
-            Text(t.task).font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle()).onTapGesture { editingId = t.id }.help("Click to edit")
+            Circle().fill(Color.secondary.opacity(0.5)).frame(width: 5, height: 5)
+            Text(t.task).font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
             Text("\(t.minutes)m · \(dayLabel(t.from))").font(.system(size: 11, design: .rounded)).foregroundStyle(.tertiary)
             Button { e.addFromBacklog(t) } label: { Label("Today", systemImage: "plus").font(.system(size: 11, weight: .semibold)) }
-                .buttonStyle(.bordered).controlSize(.mini).disabled(e.planning)
+                .buttonStyle(SecondaryButtonStyle()).disabled(e.planning)
             Button { e.dropFromBacklog(t.id) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
                 .buttonStyle(.plain).foregroundStyle(.tertiary).help("Drop it")
         }
-        .padding(.vertical, 4).padding(.horizontal, 8)
+        .padding(.vertical, 3).padding(.horizontal, 8)
     }
 
-    private var empty: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "sun.max").font(.system(size: 30, weight: .light)).foregroundStyle(.secondary)
-            Text("Nothing planned yet").font(.system(size: 15, weight: .semibold))
-            Text("Add blocks yourself below, or tell the AI what's on your plate\nand it'll fit everything around your calendar.")
-                .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
+    // MARK: composer
 
-    @ViewBuilder private var composer: some View {
-        if e.cfg.aiOn { aiComposer } else {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles").foregroundStyle(.tertiary)
-                Text("Want to plan by chatting instead? Turn on the AI planner in Settings.").foregroundStyle(.tertiary)
-                Button("Set it up") { e.plannerTab = .ai }.buttonStyle(.plain).foregroundStyle(Color.accentColor)
-                Spacer()
-                if hasPlan { Button("Clear day") { e.clearDay() }.buttonStyle(.plain).foregroundStyle(.secondary) }
-            }
-            .font(.system(size: 11.5))
-            .padding(.horizontal, 24).padding(.top, 12).padding(.bottom, 18)
-        }
-    }
-
-    private var aiComposer: some View {
+    private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !e.chat.isEmpty {
+            if e.cfg.aiOn, !e.chat.isEmpty, day == .today {
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(e.chat.suffix(3).enumerated()), id: \.offset) { _, m in
+                    ForEach(Array(e.chat.suffix(2).enumerated()), id: \.offset) { _, m in
                         HStack {
-                            if m.role != "planner" { Spacer(minLength: 60) }
+                            if m.role != "planner" { Spacer(minLength: 80) }
                             Text(m.text).font(.system(size: 12.5)).padding(.horizontal, 11).padding(.vertical, 7)
                                 .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .fill(m.role != "planner" ? Color.primary.opacity(0.07) : Color.accentColor.opacity(0.16)))
+                                    .fill(m.role != "planner" ? Color.primary.opacity(0.07) : Theme.accent.opacity(0.16)))
                                 .foregroundStyle(m.role != "planner" ? .secondary : .primary)
-                            if m.role == "planner" { Spacer(minLength: 60) }
+                            if m.role == "planner" { Spacer(minLength: 80) }
                         }
                     }
                 }
             }
-            if let err = e.planError {
-                Text("Couldn't update the plan: \(err)").font(.system(size: 12)).foregroundStyle(.red)
+            if let err = e.planError { Text("Couldn't update the plan: \(err)").font(.system(size: 12)).foregroundStyle(Theme.danger) }
+            QuickAddField(day: day, autoFocus: items.isEmpty,
+                          placeholder: items.isEmpty ? "leetcode 45, co-op web ui 90 at 2pm, essay intro 30" : "Add more, or say what changed…")
+            HStack {
+                summary
+                Spacer()
+                if !items.isEmpty { Button("Clear \(day == .today ? "today" : "tomorrow")") { e.clearDay(day) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
+        }
+        .padding(.horizontal, 24).padding(.top, 10).padding(.bottom, 18)
+    }
+
+    @ViewBuilder private var summary: some View {
+        let open = items.filter { !$0.isDone }
+        if !open.isEmpty {
+            let mins = open.reduce(0) { $0 + $1.left }
+            let end = open.compactMap { t -> Date? in parseHHMM(t.start ?? "").map { $0.addingTimeInterval(Double(t.left * 60)) } }.max()
+            Text("\(open.count) session\(open.count == 1 ? "" : "s") · \(fmtMinutes(mins))" + (end.map { day == .today ? " · done around \($0.formatted(date: .omitted, time: .shortened))" : "" } ?? ""))
+                .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+        }
+    }
+}
+
+/// The running session, on top of Today.
+struct SessionBanner: View {
+    @EnvironmentObject var e: Engine
+    var body: some View {
+        if let b = e.block {
+            HStack(spacing: 14) {
+                Ring(progress: e.progress, color: e.isBreak ? Theme.flame : (e.drifting ? Theme.danger : Theme.accent), size: 38, width: 4,
+                     track: Color.primary.opacity(0.1))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(e.isBreak ? "Break" : (b.task ?? "Locked in")).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Text("\(fmtTime(e.remaining)) left").font(Theme.number(12, .medium)).foregroundStyle(.secondary).monospacedDigit()
+                }
+                Spacer()
+                if !e.isBreak { AppIconRow(apps: b.apps ?? [], size: 18, max: 5) }
+                if e.isBreak || !e.locked {
+                    Button(e.isBreak ? "End break" : "End early") { e.stopBlock(completed: false) }.buttonStyle(SecondaryButtonStyle())
+                } else {
+                    HoldButton(label: "Hold to end early", seconds: 2, tint: Theme.danger) { e.stopBlock(completed: false) }
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.accent.opacity(0.1)))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Theme.accent.opacity(0.25)))
+        }
+    }
+}
+
+struct TodoRow: View {
+    @EnvironmentObject var e: Engine
+    let t: Todo
+    let day: PlanDay
+    var isNext: Bool
+    @Binding var hoverId: String?
+    @Binding var editingId: String?
+    @State private var picking = false
+
+    private var hover: Bool { hoverId == t.id }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            TimeButton(t: t, label: t.isDone ? "" : (clockLabel(t.start).isEmpty ? "anytime" : clockLabel(t.start)))
+                .frame(width: 66, alignment: .trailing)
+            Button { e.setDone(t.id, !t.isDone) } label: {
+                ZStack {
+                    Circle().strokeBorder(t.isDone ? Theme.accent : Color.secondary.opacity(0.5), lineWidth: 1.5)
+                    if t.isDone {
+                        Circle().fill(Theme.accent)
+                        Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.black.opacity(0.85))
+                    }
+                }
+                .frame(width: 20, height: 20).padding(4).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).help(t.isDone ? "Mark not done" : "Mark done")
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(t.task).font(.system(size: 14, weight: isNext ? .semibold : .medium))
+                        .strikethrough(t.isDone).foregroundStyle(t.isDone ? .tertiary : .primary).lineLimit(1)
+                    if t.isRoutine { Image(systemName: "repeat").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).help(e.routine(for: t)?.daysLabel ?? "Repeats") }
+                }
+                HStack(spacing: 8) {
+                    Text(!t.isDone && (t.spent ?? 0) > 0 ? "\(t.left) of \(t.minutes) min left" : "\(t.minutes) min")
+                    if !t.block.isEmpty { Text(t.block).foregroundStyle(.tertiary) }
+                    if let why = t.why, !why.isEmpty { Text(why).foregroundStyle(.tertiary) }
+                }
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { editingId = t.id }
+            Button { picking = true } label: {
+                AppIconRow(apps: t.apps ?? [], size: 17)
+                    .padding(.horizontal, 6).padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(hover ? Color.primary.opacity(0.06) : .clear))
+            }
+            .buttonStyle(.plain).help("Apps this session allows")
+            .popover(isPresented: $picking, arrowEdge: .bottom) {
+                AppPicker(selected: Binding(get: { t.apps ?? [] }, set: { e.updateTodo(t.id, apps: $0) }))
+            }
+            if hover {
+                Button { editingId = t.id } label: { Image(systemName: "pencil").font(.system(size: 11.5)) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Edit")
+                Button { e.deleteTodo(t.id) } label: { Image(systemName: "trash").font(.system(size: 11)) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
+            }
+            if day == .today && !t.isDone && (isNext || hover) && e.block == nil {
+                Button("Lock in") { e.startTodo(t); NSApp.keyWindow?.close() }
+                    .buttonStyle(PrimaryButtonStyle()).opacity(isNext || hover ? 1 : 0)
+            }
+        }
+        .padding(.vertical, 9).padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(hover ? Color.primary.opacity(0.045) : .clear))
+        .onHover { hoverId = $0 ? t.id : (hoverId == t.id ? nil : hoverId) }
+        .animation(.easeOut(duration: 0.12), value: hoverId)
+    }
+}
+
+struct EventRow: View {
+    @EnvironmentObject var e: Engine
+    let ev: CalEvent
+    @State private var hover = false
+    var body: some View {
+        let ignored = e.isIgnored(ev)
+        HStack(spacing: 12) {
+            Text(ev.start.formatted(date: .omitted, time: .shortened))
+                .font(.system(size: 12, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(.tertiary)
+                .frame(width: 66, alignment: .trailing)
+            Image(systemName: "calendar").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.info)
+                .frame(width: 20, height: 20).padding(4)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(ev.title).font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(1)
+                Text("Calendar · until \(ev.end.formatted(date: .omitted, time: .shortened))" + (ignored ? " · won't ask" : ev.recurring ? " · repeats" : ""))
+                    .font(.system(size: 12)).foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if hover && ev.end > Date() {
+                if !ignored {
+                    Button("Don't ask for this") { e.ignoreEvent(ev.title) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                if e.block == nil {
+                    Button("Lock in") {
+                        let mins = max(5, Int(ev.end.timeIntervalSince(max(Date(), ev.start)) / 60))
+                        e.startSession(task: ev.title, minutes: mins)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+            }
+        }
+        .padding(.vertical, 9).padding(.horizontal, 12)
+        .opacity(ignored ? 0.6 : 1)
+        .onHover { hover = $0 }
+    }
+}
+
+// MARK: - Adding
+
+/// The one box for planning. Without AI it reads "leetcode 45, co-op 90 at 2pm" itself (and shows what it read as you
+/// type); with the AI planner on, the same text goes to the AI, which can also edit the plan ("free at 8 now").
+struct QuickAddField: View {
+    @EnvironmentObject var e: Engine
+    var day: PlanDay
+    var autoFocus = false
+    var placeholder = "Add a session…"
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var preview: [ParsedTask] { e.cfg.aiOn ? [] : PlanParser.parse(text) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .bottom, spacing: 10) {
-                TextField(hasPlan ? "Tell me what changed: \"finished the stats hw\", \"free at 8 now\"…"
-                                  : "What do you need to get done today? Messy is fine.", text: $text, axis: .vertical)
-                    .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...5)
-                    .focused($focused)
-                    .onSubmit(send)
+                Image(systemName: "plus").font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.accent).padding(.bottom, 3)
+                TextField(placeholder, text: $text, axis: .vertical)
+                    .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...4)
+                    .focused($focused).onSubmit(send)
                 if e.planning {
                     ProgressView().controlSize(.small).padding(.bottom, 2)
                 } else {
                     Button(action: send) {
-                        Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
-                            .frame(width: 26, height: 26).background(Circle().fill(text.isEmpty ? Color.secondary.opacity(0.4) : Color.accentColor))
+                        Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(.black.opacity(0.85))
+                            .frame(width: 26, height: 26).background(Circle().fill(text.isEmpty ? Color.secondary.opacity(0.35) : Theme.accent))
                     }
-                    .buttonStyle(.plain).disabled(text.isEmpty).keyboardShortcut(.return, modifiers: [])
+                    .buttonStyle(.plain).disabled(text.trimmingCharacters(in: .whitespaces).isEmpty).keyboardShortcut(.return, modifiers: [])
                 }
             }
             .padding(.leading, 14).padding(.trailing, 8).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.primary.opacity(0.06)))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(focused ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08), lineWidth: 1))
-            HStack {
-                Text(e.planning ? (hasPlan ? "Updating your plan…" : "Lining up your day…") : "Return to send · the AI sees your calendar and plan")
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(focused ? Theme.accent.opacity(0.7) : Theme.hairline, lineWidth: 1))
+            if !preview.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(Array(preview.enumerated()), id: \.offset) { _, p in
+                        HStack(spacing: 5) {
+                            Text(p.task).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                            Text([p.minutes.map { "\($0)m" } ?? "45m", p.start.map(clockLabel) ?? (day == .today ? "next open" : "")]
+                                    .filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.system(size: 11, design: .rounded)).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.accent.opacity(0.14)))
+                    }
+                }
+            } else {
+                Text(e.planning ? (e.cfg.aiOn ? "Planning…" : "Adding…")
+                     : e.cfg.aiOn ? "Return sends it to the AI planner · it sees your plan and calendar"
+                                  : "Return adds it · a length like 45 or 1.5h, a time like at 2pm")
                     .font(.system(size: 11.5)).foregroundStyle(.tertiary)
-                Spacer()
-                if hasPlan { Button("Clear day") { e.clearDay() }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
         }
-        .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 18)
+        .onAppear { if autoFocus { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focused = true } } }
     }
 
     private func send() {
-        let t = text
-        guard !t.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !e.planning else { return }
         text = ""
-        e.sendToPlanner(t)
+        if e.cfg.aiOn { e.sendToPlanner(t, day: day) } else { e.addParsed(t, day: day) }
     }
 }
 
-// "+ Add a block": task, focus mode, length and start, pre-filled with the soonest open time. No AI involved.
-struct ManualAdd: View {
-    @EnvironmentObject var e: Engine
-    @State private var open = false
-    @State private var task = ""
-    @State private var block = ""
-    @State private var minutes = 45
-    @State private var start = Date()
-    @State private var suggested = true     // start still holds the suggestion (not picked by hand)
-    @State private var noRoom = false
-    @FocusState private var taskFocused: Bool
+// MARK: - Editing
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if open { form } else {
-                Button { openForm() } label: {
-                    Label("Add a block", systemImage: "plus").font(.system(size: 12.5, weight: .medium))
-                }
-                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
-            }
-        }
-    }
-
-    private var form: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TextField("What are you doing? e.g. Problem set 4", text: $task)
-                .textFieldStyle(.roundedBorder).focused($taskFocused).onSubmit(add)
-            HStack(spacing: 12) {
-                Picker("", selection: $block) { ForEach(e.cfg.blocks) { b in Text(b.name).tag(b.name) } }
-                    .labelsHidden().frame(maxWidth: 170)
-                    .onChange(of: block) { _, b in
-                        if let p = e.presetFor(b) { minutes = p.minutes }
-                        refreshSuggestion()
-                    }
-                Stepper("\(minutes) min", value: $minutes, in: 5...240, step: 5)
-                    .onChange(of: minutes) { _, _ in refreshSuggestion() }
-                    .fixedSize()
-                DatePicker("", selection: Binding(get: { start }, set: { start = $0; suggested = false }), displayedComponents: .hourAndMinute)
-                    .labelsHidden().fixedSize()
-            }
-            HStack(spacing: 10) {
-                Text(noRoom ? "Nothing open before the end of the day" : suggested ? "Soonest open time" : "Your time")
-                    .font(.system(size: 11.5)).foregroundStyle(noRoom ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
-                if !suggested { Button("Use soonest") { suggested = true; refreshSuggestion() }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Color.accentColor) }
-                Spacer()
-                Button("Cancel") { open = false }.controlSize(.small)
-                Button("Add", action: add).buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(task.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.05)))
-    }
-
-    private func openForm() {
-        task = ""; suggested = true
-        if block.isEmpty || e.presetFor(block) == nil { block = e.cfg.blocks.first?.name ?? "" }
-        minutes = e.presetFor(block)?.minutes ?? 45
-        open = true; taskFocused = true
-        refreshSuggestion()
-    }
-
-    private func refreshSuggestion() {
-        guard suggested else { return }
-        let m = minutes
-        DispatchQueue.global(qos: .userInitiated).async {
-            let s = soonestSlot(minutes: m)
-            DispatchQueue.main.async {
-                guard suggested, m == minutes else { return }
-                noRoom = s.isEmpty
-                if let d = parseHHMM(s) { start = d }
-            }
-        }
-    }
-
-    private func add() {
-        let t = task.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty else { return }
-        e.addTodo(task: t, block: block, minutes: minutes, start: hhmm(start))
-        task = ""; suggested = true; refreshSuggestion(); taskFocused = true   // ready for the next one
-    }
-}
-
-// Edit a to-do by hand: its text, focus block, length and start (backlog items have no start). Same look as
-// "Add a block". Keeps the id, done, spent and why; changing the length leaves the minutes already worked alone.
+/// Edit a session by hand: what, how long, when, which apps, whether it repeats, and which day.
 struct TodoEditor: View {
     @EnvironmentObject var e: Engine
     let t: Todo
-    var backlog = false
+    var day: PlanDay
     var onClose: () -> Void
     @State private var task: String
-    @State private var block: String
     @State private var minutes: Int
     @State private var start: Date
-    @State private var timed: Bool          // has a start time (unscheduled to-dos show "later")
+    @State private var timed: Bool
+    @State private var apps: [String]
+    @State private var repeatDays: Set<Int>
     @FocusState private var taskFocused: Bool
 
-    init(t: Todo, backlog: Bool = false, onClose: @escaping () -> Void) {
-        self.t = t; self.backlog = backlog; self.onClose = onClose
+    init(t: Todo, day: PlanDay, onClose: @escaping () -> Void) {
+        self.t = t; self.day = day; self.onClose = onClose
         let s = parseHHMM(t.start ?? "")
         _task = State(initialValue: t.task)
-        _block = State(initialValue: t.block)
         _minutes = State(initialValue: t.minutes)
         _start = State(initialValue: s ?? Date())
         _timed = State(initialValue: s != nil)
-    }
-
-    /// Saved blocks, plus this to-do's own block if it isn't one of them (the AI can name blocks loosely).
-    private var blockNames: [String] {
-        let names = e.cfg.blocks.map(\.name)
-        return names.contains(t.block) ? names : [t.block] + names
-    }
-    private var note: String {
-        let spent = t.spent ?? 0
-        guard spent > 0, !t.isDone else { return "Return saves · Esc cancels" }
-        return "\(spent) min already done · \(max(1, minutes - spent)) left"
+        _apps = State(initialValue: t.apps ?? [])
+        _repeatDays = State(initialValue: Set(Engine.shared.routine(for: t)?.days ?? []))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             TextField("What are you doing? e.g. Problem set 4", text: $task)
                 .textFieldStyle(.roundedBorder).focused($taskFocused).onSubmit(save)
-            HStack(spacing: 12) {
-                Picker("", selection: $block) { ForEach(blockNames, id: \.self) { b in Text(b).tag(b) } }
-                    .labelsHidden().frame(maxWidth: 170)
+            HStack(spacing: 14) {
                 Stepper("\(minutes) min", value: $minutes, in: 5...240, step: 5).fixedSize()
-                if !backlog {
-                    if timed {
-                        DatePicker("", selection: $start, displayedComponents: .hourAndMinute).labelsHidden().fixedSize()
-                    } else {
-                        Button("Set a time") { timed = true }.controlSize(.small)
-                    }
-                }
-            }
-            HStack(spacing: 10) {
-                Text(note).font(.system(size: 11.5)).foregroundStyle(.tertiary)
-                if !backlog && timed {
-                    Button("No set time") { timed = false }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Color.accentColor)
+                if timed {
+                    DatePicker("", selection: $start, displayedComponents: .hourAndMinute).labelsHidden().fixedSize()
+                    Button("Any time") { timed = false }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Theme.accent)
+                } else {
+                    Button("Set a time") { timed = true }.controlSize(.small)
                 }
                 Spacer()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Apps this session allows").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+                AppChips(apps: $apps)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Repeat").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+                RepeatPicker(days: $repeatDays)
+            }
+            HStack(spacing: 10) {
+                Button(day == .today ? "Move to tomorrow" : "Move to today") { save(); e.move(t.id, to: day == .today ? .tomorrow : .today) }
+                    .buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Spacer()
                 Button("Cancel", action: onClose).controlSize(.small).keyboardShortcut(.cancelAction)
-                Button("Save", action: save).buttonStyle(.borderedProminent).controlSize(.small)
+                Button("Save", action: save).buttonStyle(PrimaryButtonStyle())
                     .disabled(task.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
         .onAppear { taskFocused = true }
     }
 
     private func save() {
         let text = task.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
-        e.updateTodo(t.id, task: text, block: block, start: backlog ? nil : (timed ? hhmm(start) : ""), minutes: minutes)
+        e.updateTodo(t.id, task: text, start: timed ? hhmm(start) : "", minutes: minutes, apps: apps)
+        let wasRepeating = Set(e.routine(for: t)?.days ?? [])
+        if repeatDays != wasRepeating || (!repeatDays.isEmpty && t.isRoutine) {
+            var updated = t; updated.task = text; updated.minutes = minutes; updated.start = timed ? hhmm(start) : ""; updated.apps = apps
+            e.setRepeat(updated, days: repeatDays.isEmpty ? nil : Array(repeatDays))
+        }
         onClose()
+    }
+}
+
+/// Days a session repeats on: quick presets plus a toggle per weekday.
+struct RepeatPicker: View {
+    @Binding var days: Set<Int>
+    private let symbols = Calendar.current.veryShortWeekdaySymbols   // S M T W T F S
+    var body: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Button("Never") { days = [] }
+                Button("Every day") { days = Set(1...7) }
+                Button("Weekdays") { days = [2, 3, 4, 5, 6] }
+                Button("Weekends") { days = [1, 7] }
+            } label: { Text(label).font(.system(size: 12)) }
+                .menuStyle(.borderlessButton).fixedSize()
+            ForEach(1...7, id: \.self) { d in
+                let on = days.contains(d)
+                Button { if on { days.remove(d) } else { days.insert(d) } } label: {
+                    Text(symbols[d - 1]).font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
+                        .foregroundStyle(on ? Color.black.opacity(0.85) : .secondary)
+                        .background(Circle().fill(on ? Theme.accent : Color.primary.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+    private var label: String {
+        if days.isEmpty { return "Never" }
+        if days.count == 7 { return "Every day" }
+        if days == [2, 3, 4, 5, 6] { return "Weekdays" }
+        if days == [1, 7] { return "Weekends" }
+        return "Custom"
+    }
+}
+
+/// The apps as removable chips with icons, plus "Add app".
+struct AppChips: View {
+    @Binding var apps: [String]
+    @State private var picking = false
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(apps, id: \.self) { a in
+                HStack(spacing: 5) {
+                    AppIconView(name: a, size: 15)
+                    Text(a).font(.system(size: 12))
+                    Button { apps.removeAll { $0 == a } } label: {
+                        Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.leading, 6).padding(.trailing, 8).padding(.vertical, 4)
+                .background(Capsule().fill(Color.primary.opacity(0.07)))
+            }
+            Button { picking = true } label: {
+                Label("Add app", systemImage: "plus").font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().strokeBorder(Theme.accent.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+            }
+            .buttonStyle(.plain).foregroundStyle(Theme.accent)
+            .popover(isPresented: $picking, arrowEdge: .bottom) { AppPicker(selected: $apps) }
+        }
+    }
+}
+
+/// Search installed apps and tick the ones you want. Work apps and running apps are on top.
+struct AppPicker: View {
+    @Binding var selected: [String]
+    @State private var query = ""
+    private var names: [String] {
+        let suggested = InstalledApps.suggested
+        let rest = InstalledApps.all.map(\.name).filter { !suggested.contains($0) }
+        let all = selected.filter { !suggested.contains($0) && !rest.contains($0) } + suggested + rest
+        guard !query.isEmpty else { return all }
+        return all.filter { $0.localizedCaseInsensitiveContains(query) || InstalledApps.display(for: $0).localizedCaseInsensitiveContains(query) }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Search apps", text: $query).textFieldStyle(.roundedBorder)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(names, id: \.self) { n in
+                        let on = selected.contains(n)
+                        Button { if on { selected.removeAll { $0 == n } } else { selected.append(n) } } label: {
+                            HStack(spacing: 8) {
+                                AppIconView(name: n, size: 18)
+                                Text(n).font(.system(size: 12.5))
+                                if InstalledApps.display(for: n) != n {
+                                    Text(InstalledApps.display(for: n)).font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1)
+                                }
+                                Spacer()
+                                if on { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.accent) }
+                            }
+                            .padding(.horizontal, 6).padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Theme.accent.opacity(0.1) : .clear))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(height: 280)
+            Text("\(selected.count) selected · everything else gets covered").font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+        .padding(12).frame(width: 290)
     }
 }
 
@@ -585,27 +704,13 @@ struct TimeButton: View {
                             DispatchQueue.main.async { if let d = parseHHMM(s) { pick = d } }
                         }
                     }
-                    Button("Unschedule") { e.updateTodo(t.id, start: ""); editing = false }
+                    Button("Any time") { e.updateTodo(t.id, start: ""); editing = false }
                     Spacer()
-                    Button("Save") { e.updateTodo(t.id, start: hhmm(pick)); editing = false }.buttonStyle(.borderedProminent)
+                    Button("Save") { e.updateTodo(t.id, start: hhmm(pick)); editing = false }.buttonStyle(PrimaryButtonStyle())
                 }
                 .controlSize(.small)
             }
-            .padding(14).frame(width: 260)
+            .padding(14).frame(width: 270)
         }
     }
-}
-
-func parseHHMM(_ s: String) -> Date? {
-    let p = s.split(separator: ":").compactMap { Int($0) }
-    guard p.count == 2 else { return nil }
-    return Calendar.current.date(bySettingHour: p[0], minute: p[1], second: 0, of: Date())
-}
-func hhmm(_ d: Date) -> String {
-    let c = Calendar.current.dateComponents([.hour, .minute], from: d)
-    return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
-}
-
-extension DateFormatter {
-    static let ymd: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f }()
 }

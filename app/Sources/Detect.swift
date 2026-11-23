@@ -49,7 +49,7 @@ enum Detect {
     static func browserTab(_ app: String) -> (String, String) {
         let src = browsers[app] == "safari"
             ? "tell application \"Safari\" to return (URL of current tab of front window) & \"\\n\" & (name of current tab of front window)"
-            : "tell application \"\(app)\" to return (URL of active tab of front window) & \"\\n\" & (title of active tab of front window)"
+            : "tell application \"\(escape(app))\" to return (URL of active tab of front window) & \"\\n\" & (title of active tab of front window)"
         guard let out = osa(src, app: app) else { return ("", "") }
         let parts = out.split(separator: "\n", maxSplits: 1).map(String.init)
         return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
@@ -70,11 +70,18 @@ enum Detect {
         return out.isEmpty ? nil : out
     }
 
-    static func context() -> FrontContext {
+    /// The front app, its open tab (browsers) and, with `terminals`, the folder of a Claude Code session in it.
+    static func context(terminals withTerminals: Bool = true) -> FrontContext {
         var c = FrontContext(app: frontApp())
         if browsers[c.app] != nil { (c.url, c.title) = browserTab(c.app) }
-        else if terminals.contains(c.app) { c.project = claudeProject(c.app) }
+        else if withTerminals, terminals.contains(c.app) { c.project = claudeProject(c.app) }
         return c
+    }
+
+    /// Makes text safe inside an AppleScript string literal.
+    static func escape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
 
     static func idleSeconds() -> Double {

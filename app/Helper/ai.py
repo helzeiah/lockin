@@ -116,11 +116,26 @@ def _openai(prompt, schema, system, model, base, key, provider):
     return _parse(text)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: urllib would re-send the API key headers to wherever the redirect points."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
 def _post(url, headers, body, timeout=120):
+    parts = urllib.parse.urlparse(url)
+    if parts.scheme not in ("https", "http"):
+        raise AIError(f"the server address must start with https:// (got {url[:60]})")
+    if parts.scheme == "http" and parts.hostname not in LOCAL_HOSTS and any(k.lower() in ("authorization", "x-api-key") for k in headers):
+        raise AIError("refusing to send your API key over plain http: use an https:// address (http is fine for localhost)")
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener.open(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")
@@ -131,6 +146,8 @@ def _post(url, headers, body, timeout=120):
             pass
         if e.code in (401, 403):
             raise AIError("the API key was rejected: check it in Settings > AI planner", e.code)
+        if 300 <= e.code < 400:
+            raise AIError(f"the server redirected (HTTP {e.code}); set its final address as the base URL", e.code)
         raise AIError(f"HTTP {e.code}: {str(detail)[:160]}", e.code)
     except (urllib.error.URLError, OSError) as e:
         raise AIError(f"couldn't reach {urllib.parse.urlparse(url).netloc}: {getattr(e, 'reason', e)}")

@@ -206,7 +206,9 @@ struct IslandView: View {
                         .foregroundStyle(.white.opacity(0.92)).lineLimit(1)
                     Spacer(minLength: 6)
                     iconButton("plus", help: "Add 5 minutes") { e.addFive() }
-                    iconButton("stop.fill", help: "Stop") { e.stopBlock(completed: false) }
+                    iconButton("stop.fill", help: e.locked && !e.isBreak ? "End early" : "Stop") {
+                        if e.locked && !e.isBreak { e.perform(.confirmStop) } else { e.stopBlock(completed: false) }
+                    }
                 }
                 GeometryReader { gr in
                     ZStack(alignment: .leading) {
@@ -298,9 +300,14 @@ struct IslandView: View {
                     if !c.subtitle.isEmpty {
                         Text(c.subtitle).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(3)
                     }
+                    if let at = c.countdown {
+                        let secs = max(0, Int(at.timeIntervalSince(e.now).rounded(.up)))
+                        Text("Starts in \(secs)s").font(.system(size: 11.5, weight: .semibold, design: .rounded)).monospacedDigit()
+                            .foregroundStyle(Theme.accent).contentTransition(.numericText(countsDown: true))
+                    }
                 }
                 Spacer(minLength: 8)
-                if e.block != nil && (c.icon == "scope" || c.icon == "eye.fill") {
+                if e.block != nil && ["lock.fill", "eye.fill", "moon.zzz.fill"].contains(c.icon) {
                     ZStack {
                         Ring(progress: e.progress, color: ringColor, size: 30, width: 3)
                         Text("\(Int(e.progress * 100))").font(.system(size: 9, weight: .semibold, design: .rounded)).monospacedDigit()

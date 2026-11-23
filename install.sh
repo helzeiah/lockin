@@ -10,14 +10,19 @@ trap cleanup EXIT
 main() {
   local repo="helzeiah/lockin" dest="$HOME/Applications"
   TMP_DIR="$(mktemp -d)"
-  local tmp="$TMP_DIR"
+  local tmp="$TMP_DIR" base="https://github.com/helzeiah/lockin/releases/latest/download"
 
   [[ "$(uname)" == "Darwin" ]] || { echo "lockin is a macOS app."; exit 1; }
   local major; major="$(sw_vers -productVersion | cut -d. -f1)"
   (( major >= 14 )) || { echo "lockin needs macOS 14 (Sonoma) or later."; exit 1; }
 
   echo "Downloading lockin..."
-  curl -fsSL "https://github.com/$repo/releases/latest/download/lockin.zip" -o "$tmp/lockin.zip"
+  curl -fsSL "$base/lockin.zip" -o "$tmp/lockin.zip"
+  curl -fsSL "$base/lockin.zip.sha256" -o "$tmp/lockin.zip.sha256"
+  local want got
+  want="$(awk '{print $1}' "$tmp/lockin.zip.sha256")"
+  got="$(shasum -a 256 "$tmp/lockin.zip" | awk '{print $1}')"
+  [[ -n "$want" && "$want" == "$got" ]] || { echo "Checksum mismatch: the download is incomplete or was changed. Nothing was installed."; exit 1; }
   ditto -x -k "$tmp/lockin.zip" "$tmp"
 
   # Quit only our own copies: this app, and the old Focus.app from before the rename.

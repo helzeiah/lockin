@@ -2,8 +2,9 @@ import Charts
 import Foundation
 import SwiftUI
 
-// Study stats from log.jsonl: minutes focused per day, streaks, the week, and which blocks the time went to.
-// Every finished block already logs `focused_min`, so history goes back to the first block ever run.
+// Stats from log.jsonl: minutes focused per day, streaks, the week, where the time went, and the accountability
+// record (sessions kept vs. ended early, skipped mornings, passes). Every finished session logs `focused_min`, so
+// history goes back to the first one ever run.
 
 struct StatsDay: Identifiable, Hashable {
     var date: Date          // start of the day (local midnight)
@@ -12,8 +13,12 @@ struct StatsDay: Identifiable, Hashable {
 }
 
 struct Stats {
-    static let dayStartsAt = 4          // a block that ends before 4am counts for the night before
+    static let dayStartsAt = 4          // a session that ends before 4am counts for the night before
     var days: [Date: Int] = [:]         // focused minutes by day
+    var kept: [Date: Int] = [:]         // sessions that ran to the end
+    var endedEarly: [Date: Int] = [:]   // sessions stopped early (or by quitting lockin)
+    var skips: [Date: Int] = [:]        // mornings skipped on the morning screen
+    var passes: [Date: Int] = [:]       // "Give me 5 min" taken
     var byBlock: [(name: String, minutes: Int)] = []
     var first: Date?
     var goal: Int = 25                  // minutes for a day to count toward the streak
@@ -25,12 +30,21 @@ struct Stats {
         let parse = DateFormatter(); parse.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         if let text = try? String(contentsOf: Paths.log, encoding: .utf8) {
             for line in text.split(separator: "\n") {
-                guard line.contains("\"block_end\""),
+                guard line.contains("\"block_end\"") || line.contains("\"gate_skipped\"") || line.contains("\"pass\""),
                       let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
                       let ts = (obj["ts"] as? String).flatMap(parse.date(from:)) else { continue }
-                let m = (obj["focused_min"] as? Int) ?? 0
-                s.add(m, at: ts)
-                if m > 0 { blocks[(obj["name"] as? String) ?? "Other", default: 0] += m }
+                let d = Stats.day(of: ts)
+                switch obj["type"] as? String {
+                case "block_end":
+                    let m = (obj["focused_min"] as? Int) ?? 0
+                    s.add(m, at: ts)
+                    if m > 0 { blocks[(obj["name"] as? String) ?? "Other", default: 0] += m }
+                    if obj["completed"] as? Bool == true { s.kept[d, default: 0] += 1 }
+                    else if obj["how"] as? String != "replaced" { s.endedEarly[d, default: 0] += 1 }
+                case "gate_skipped": s.skips[d, default: 0] += 1
+                case "pass": s.passes[d, default: 0] += 1
+                default: break
+                }
             }
         }
         // the block running right now counts toward today as it goes
@@ -54,6 +68,19 @@ struct Stats {
     }
 
     func minutes(_ d: Date) -> Int { days[d] ?? 0 }
+    func keptCount(_ d: Date) -> Int { kept[d] ?? 0 }
+    func ended(_ d: Date) -> Int { (kept[d] ?? 0) + (endedEarly[d] ?? 0) }
+    /// Sums over this week so far.
+    private func weekSum(_ m: [Date: Int]) -> Int { week.reduce(0) { $0 + (m[$1.date] ?? 0) } }
+    var weekKept: Int { weekSum(kept) }
+    var weekEndedEarly: Int { weekSum(endedEarly) }
+    var weekSkips: Int { weekSum(skips) }
+    var weekPasses: Int { weekSum(passes) }
+    /// Share of all sessions ever that ran to the end, 0-100 (nil before the first one).
+    var keptRate: Int? {
+        let k = kept.values.reduce(0, +), e = endedEarly.values.reduce(0, +)
+        return k + e == 0 ? nil : k * 100 / (k + e)
+    }
     func counts(_ d: Date) -> Bool { minutes(d) >= goal }
     var total: Int { days.values.reduce(0, +) }
     var todayMinutes: Int { minutes(Stats.today) }
@@ -261,7 +288,22 @@ struct DayBars: View {
     }
 }
 
-// MARK: the planner's Stats tab
+// MARK: the Stats page
+
+struct StatsPage: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Date().formatted(.dateTime.weekday(.wide).month(.wide).day())).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+                Text("Your focus").font(.system(size: 28, weight: .bold)).tracking(-0.5)
+            }
+            .padding(.horizontal, 28).padding(.top, 36).padding(.bottom, 18)
+            StatsView()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(VisualEffect(material: .underWindowBackground))
+    }
+}
 
 struct StatsView: View {
     @EnvironmentObject var e: Engine
@@ -276,21 +318,23 @@ struct StatsView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     tiles
                     if stats.total == 0 {
-                        Label("Finish a block and it shows up here. A day counts once you hit \(stats.goal) minutes.", systemImage: "sparkles")
+                        Label("Finish a session and it shows up here. A day counts once you hit \(stats.goal) minutes.", systemImage: "sparkles")
                             .font(.system(size: 12.5)).foregroundStyle(.secondary)
                     }
                     section("Last 14 days") { DayBars(days: stats.last(14), goal: stats.goal).frame(height: 150) }
                     section("Every day since you started", trailing: AnyView(HeatLegend(dark: scheme == .dark))) {
-                        // enough weeks to show your whole history (at least 12), squares as big as the width allows
+                        // As many weeks as fit the width (your whole history at least), GitHub-style
                         let avail = geo.size.width - 56
-                        let weeks = max(12, min(52, stats.weeksSinceFirst + 1))
-                        let cell = min(20, max(10, avail / CGFloat(weeks) - 4))
+                        let fit = Int((avail + 4) / 18)
+                        let weeks = min(53, max(12, fit, stats.weeksSinceFirst + 1))
+                        let cell = min(20, max(9, (avail - CGFloat(weeks - 1) * 4) / CGFloat(weeks)))
                         let grid = HeatGrid(stats: stats, weeks: weeks, cell: cell, gap: 4, dark: scheme == .dark)
                         ViewThatFits(in: .horizontal) {
                             grid
                             ScrollView(.horizontal, showsIndicators: false) { grid }.defaultScrollAnchor(.trailing)
                         }
                     }
+                    section("This week, on the record") { record }
                     if !stats.byBlock.isEmpty { section("Where the time went") { blockSplit } }
                 }
                 .padding(.horizontal, 28).padding(.bottom, 24)
@@ -306,24 +350,48 @@ struct StatsView: View {
 
     private var tiles: some View {
         HStack(spacing: 10) {
-            tile(fmtMinutes(stats.todayMinutes), "today", accent: stats.todayMinutes >= stats.goal)
-            tile("\(stats.weekDaysCounted)/\(stats.weekGoal)", "days this week · \(fmtMinutes(stats.weekMinutes))", accent: stats.weekDaysCounted >= stats.weekGoal)
+            tile(fmtMinutes(stats.todayMinutes), "today · goal \(stats.goal) min", accent: stats.todayMinutes >= stats.goal)
             tile("\(stats.streak)", "day streak · best \(stats.best)", icon: stats.streak > 0 ? "flame.fill" : nil, accent: stats.streak > 0)
+            tile("\(stats.weekDaysCounted)/\(stats.weekGoal)", "days this week · \(fmtMinutes(stats.weekMinutes))", accent: stats.weekDaysCounted >= stats.weekGoal)
+            tile(stats.keptRate.map { "\($0)%" } ?? "–", "sessions kept, all time", accent: (stats.keptRate ?? 0) >= 80)
         }
+    }
+
+    /// Kept vs. ended early, skipped mornings and passes this week: the honest part.
+    private var record: some View {
+        HStack(spacing: 10) {
+            recordItem("\(stats.weekKept)", "kept", icon: "checkmark.circle.fill", tint: Theme.accent)
+            recordItem("\(stats.weekEndedEarly)", "ended early", icon: "stop.circle.fill", tint: stats.weekEndedEarly > 0 ? Theme.danger : .secondary)
+            recordItem("\(stats.weekSkips)", stats.weekSkips == 1 ? "morning skipped" : "mornings skipped", icon: "sunrise.fill", tint: stats.weekSkips > 0 ? Theme.flame : .secondary)
+            recordItem("\(stats.weekPasses)", stats.weekPasses == 1 ? "pass taken" : "passes taken", icon: "hourglass", tint: .secondary)
+        }
+    }
+    private func recordItem(_ value: String, _ label: String, icon: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 14)).foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(value).font(Theme.number(16)).monospacedDigit()
+                Text(label).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.card))
     }
 
     private func tile(_ value: String, _ label: String, icon: String? = nil, accent: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                if let icon { Image(systemName: icon).font(.system(size: 15)).foregroundStyle(tintColor("orange")) }
-                Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
-                    .foregroundStyle(accent ? tintColor("green") : .primary)
+                if let icon { Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Theme.flame) }
+                Text(value).font(Theme.number(22)).monospacedDigit()
+                    .foregroundStyle(accent ? Theme.accent : .primary)
             }
             Text(label).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.85)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.card))
     }
 
     private func section<C: View>(_ title: String, trailing: AnyView? = nil, @ViewBuilder _ content: () -> C) -> some View {

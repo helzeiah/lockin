@@ -2,7 +2,12 @@ import AppKit
 import Combine
 import Foundation
 
-enum CardAction: Hashable { case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, addFive, startGoal, openStats }
+enum CardAction: Hashable {
+    case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, confirmStop, addFive, startGoal, openStats
+    case planTomorrow
+    case startTodo(String), snoozeTodo(String)
+    case lockInEvent(String), skipEvent(String), neverEvent(String)
+}
 
 /// A short message that drops out of the notch for a few seconds (check-ins). Never steals focus, never needs a click.
 struct Flash: Equatable {
@@ -12,9 +17,10 @@ struct Flash: Equatable {
     var tint: String = "green"
 }
 
-/// The cover's target: a distracting site, a distracting app, or (strict blocks) any app or page outside the block.
+/// What the cover is over: a distracting site or app, an app outside the session, or (outside sessions, before today
+/// counts) a distraction you haven't earned yet.
 struct Blocked: Equatable {
-    enum Kind { case site, app, strict }
+    enum Kind { case site, app, strict, earn }
     var site: String
     var app: String
     var frame: NSRect?
@@ -33,6 +39,8 @@ struct Card: Identifiable, Equatable {
     var lines: [CardLine] = []
     var buttons: [CardButton] = []
     var autoClose: Double? = nil
+    var countdown: Date? = nil       // shows "in 12s" and runs onTimeout when it reaches zero
+    var onTimeout: CardAction? = nil
 }
 
 @MainActor
@@ -47,16 +55,22 @@ final class Engine: ObservableObject {
     /// The stats drop-down under the notch.
     @Published var statsShown = false
     @Published var plannerTab: PlannerTab = .plan
+    @Published var planDay: PlanDay = .today
     @Published var flash: Flash?
     private var flashTask: DispatchWorkItem?
-    private var checkedIn: (half: Double, last: Double) = (0, 0)   // the block (by start time) each check-in already ran for
+    private var checkedIn: (half: Double, last: Double) = (0, 0)   // the session (by start time) each check-in already ran for
     @Published var todos: [Todo] = []
+    @Published var tomorrow: [Todo] = []
     @Published var chat: [ChatMsg] = []
     @Published var backlog: [Todo] = []
+    @Published var events: [CalEvent] = []
     private var lastDay = today()
     @Published var planning = false
     @Published var planError: String?
     @Published var blocked: Blocked? = nil
+    @Published var gateShown = false
+    /// Focused minutes today (finished sessions), refreshed when a session ends and once a minute.
+    @Published var todayMinutes = 0
     /// The app you were last in, other than lockin itself (the menu's popover makes lockin the front app).
     @Published var lastExternalApp = ""
 
@@ -72,14 +86,22 @@ final class Engine: ObservableObject {
     private var lastCoverSound = Date.distantPast
     private var closeTask: DispatchWorkItem?
     private var checking = false
+    private var askedEvents = Set<String>()
+    private var promptedTodos = Set<String>()
+    private var minuteCount = 0
 
+    /// The running session's rules: only its apps (plus always-fine ones), its task rule's sites and Claude folders.
     var preset: Preset? {
-        guard let b = block else { return nil }
-        if let apps = b.apps {   // quick focus: only the picked apps; a picked terminal also allows its Claude sessions
-            let term = apps.contains { Detect.terminals.contains($0) }
-            return Preset(name: b.name, minutes: b.minutes, sites: [], apps: apps, any_claude: term, terminal_ok: term, strict: true)
-        }
-        return presetFor(b.name)
+        guard let b = block, b.kind == "focus" else { return nil }
+        let rule = (b.rule ?? (b.apps == nil ? b.name : nil)).flatMap { r in cfg.blocks.first { $0.name == r } }
+        let apps = b.apps ?? rule?.apps ?? cfg.lockin_apps ?? []
+        let terminal = apps.contains { Detect.terminals.contains($0) }
+        var p = rule ?? Preset(name: b.name, minutes: b.minutes)
+        p.apps = apps
+        p.strict = true
+        p.terminal_ok = terminal
+        p.any_claude = (rule?.projects ?? []).isEmpty ? terminal : false   // no folder rule: any Claude session counts
+        return p
     }
     var isBreak: Bool { block?.kind == "break" }
     var remaining: Double { (block?.ends ?? 0) - now.timeIntervalSince1970 }
@@ -88,27 +110,50 @@ final class Engine: ObservableObject {
         return min(1, max(0, 1 - remaining / Double(b.minutes * 60)))
     }
     var nextTodo: Todo? { todos.first { !$0.isDone } }
+    var goal: Int { cfg.stats_goal ?? 25 }
+    var todayCounts: Bool { todayMinutes >= goal }
 
-    // Covers: "Give me 5 min" waits a few seconds and runs out (ScreenZen-style friction), unless blocking is "Nudge only".
+    // Passes: "Give me 5 min" waits a few seconds (friction), runs out, and doesn't exist in Locked mode.
     static let snoozesPerBlock = 2
     static let snoozeWait = 10.0
-    var blockingMode: String { cfg.blocking ?? "cover" }
-    var snoozesLeft: Int {
-        switch blockingMode {
-        case "nudge": return .max
-        case "hard": return 0
-        default: return max(0, Engine.snoozesPerBlock - (block?.snoozes ?? 0))
-        }
+    var locked: Bool { cfg.locked }
+    /// Earning free time: outside sessions, distractions stay covered until today counts.
+    var earning: Bool { (cfg.earn_free_time ?? true) && !todayCounts && !SetupWindow.needed }
+    private var freePassesKey: String { "freePasses-" + today() }
+    var freePassesUsed: Int { UserDefaults.standard.integer(forKey: freePassesKey) }
+    var passesLeft: Int {
+        if locked { return 0 }
+        if blocked?.kind == .earn { return max(0, (cfg.free_passes ?? 3) - freePassesUsed) }
+        return max(0, Engine.snoozesPerBlock - (block?.snoozes ?? 0))
     }
-    /// Seconds until "Give me 5 min" can be clicked on the current cover.
-    var snoozeWaitLeft: Int {
-        blockingMode == "nudge" ? 0 : max(0, Int((Engine.snoozeWait - now.timeIntervalSince(coverShownAt)).rounded(.up)))
+    /// Seconds until a pass (or "Add to this session") can be clicked on the current cover.
+    var snoozeWaitLeft: Int { max(0, Int((Engine.snoozeWait - now.timeIntervalSince(coverShownAt)).rounded(.up))) }
+    /// An app outside the session that isn't a distraction can be added to it (it's logged).
+    var canAddBlockedApp: Bool {
+        guard let b = blocked, b.kind == .strict, block?.kind == "focus" else { return false }
+        return anyIn(b.app, cfg.distractions.apps) == nil
     }
 
     init() {
-        cfg = Config.load() ?? Config(distractions: Distractions(apps: [], sites: []), block_sites: [], blocks: [])
+        cfg = Config.load() ?? .empty
         reloadTodos()
-        if let a = AppState.load().active, a.ends > Date().timeIntervalSince1970 { block = a }
+        restoreSession()
+        todayMinutes = finishedToday()
+    }
+
+    /// Picks the running session back up after a restart. One that ran out while lockin was quit counts up to the quit.
+    private func restoreSession() {
+        var s = AppState.load()
+        defer { s.quit_at = nil; s.save() }
+        guard let a = s.active else { return }
+        let t = Date().timeIntervalSince1970
+        if a.ends > t { block = a; return }
+        s.active = nil
+        guard a.kind == "focus", let q = s.quit_at else { return }
+        let end = min(q, a.ends)
+        let elapsed = max(0, Int((end - a.started) / 60))
+        appendLog(["type": "block_end", "name": a.name, "task": a.task ?? "", "completed": false, "how": "quit", "planned_min": a.minutes,
+                   "elapsed_min": elapsed, "focused_min": max(0, elapsed - Int(a.offSeconds / 60)), "apps": a.apps ?? []])
     }
 
     func start() {
@@ -131,89 +176,184 @@ final class Engine: ObservableObject {
         DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in
             Task { @MainActor in self.morningCheck() }
         }
+        refreshEvents()
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.morningCheck() }
     }
 
-    func reloadConfig() { if let c = Config.load() { cfg = c } }
+    func reloadConfig() { if let c = Config.load() { cfg = c; statsCache = nil } }
     func reloadTodos() {
-        let d = TodoDoc.load()      // rolls yesterday's leftovers into the backlog
+        let d = TodoDoc.load()      // rolls yesterday's leftovers into the backlog, tomorrow into today
         todos = d.items
+        tomorrow = d.tomorrow ?? []
         chat = d.chat ?? []
         backlog = d.backlog ?? []
     }
+    func list(_ day: PlanDay) -> [Todo] { day == .today ? todos : tomorrow }
 
-    // Back into today at the soonest open time; no AI needed.
-    func addFromBacklog(_ t: Todo) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let start = soonestSlot(minutes: t.minutes)
-            Task { @MainActor in self.moveFromBacklog(t, start: start) }
+    func refreshEvents() {
+        guard (cfg.calendar_mode ?? "ask") != "off" else { events = []; return }
+        DispatchQueue.global(qos: .utility).async {
+            let ev = CalendarFeed.events()
+            Task { @MainActor in self.events = ev }
         }
     }
-    private func moveFromBacklog(_ t: Todo, start: String) {
-        var d = TodoDoc.load()
-        d.backlog?.removeAll { $0.id == t.id }
-        var item = t; item.from = nil; item.start = start; item.done = false; item.why = ""
-        d.items.append(item); d.sortItems(); d.save(); reloadTodos()
+
+    // MARK: planning (works without any AI)
+
+    /// Adds what you typed ("leetcode 45, co-op 90 at 2pm") to today or tomorrow. Today, tasks without a time get the
+    /// soonest open slot; each one's apps come from its words.
+    func addParsed(_ text: String, day: PlanDay) {
+        let parsed = PlanParser.parse(text)
+        guard !parsed.isEmpty else { return }
+        let cfg = self.cfg
+        planning = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let history = TaskMatch.history()
+            for p in parsed {
+                let minutes = p.minutes ?? 45
+                let start = p.start ?? (day == .today ? soonestSlot(minutes: minutes) : "")
+                let match = TaskMatch.apps(for: p.task, cfg: cfg, history: history)
+                DispatchQueue.main.sync {
+                    self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule)
+                }
+            }
+            Task { @MainActor in self.planning = false }
+        }
     }
 
-    // MARK: manual planning (works without any AI)
-    func addTodo(task: String, block: String, minutes: Int, start: String) {
+    func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil) {
         var d = TodoDoc.load()
-        if d.date?.isEmpty ?? true { d.date = today() }
-        d.items.append(Todo(id: String(UUID().uuidString.prefix(8)).lowercased(), task: task, block: block, minutes: minutes, start: start))
-        d.sortItems(); d.save(); reloadTodos()
+        d.edit(day) { $0.append(Todo(id: Todo.newId(), task: task, block: rule ?? "", minutes: minutes, start: start, apps: apps)) }
+        d.save(); reloadTodos()
     }
-    /// Edits a to-do in today's plan or the backlog. Only the fields passed change; id, done, spent and why stay.
-    func updateTodo(_ id: String, task: String? = nil, block: String? = nil, start: String? = nil, minutes: Int? = nil) {
+
+    /// Edits a to-do wherever it is (today, tomorrow or the backlog). Only the fields passed change.
+    func updateTodo(_ id: String, task: String? = nil, start: String? = nil, minutes: Int? = nil, apps: [String]? = nil) {
         var d = TodoDoc.load()
         func apply(_ t: inout Todo) {
             if let task { t.task = task }
-            if let block { t.block = block }
             if let start { t.start = start }
             if let minutes { t.minutes = minutes }
+            if let apps { t.apps = apps }
         }
-        if let i = d.items.firstIndex(where: { $0.id == id }) { apply(&d.items[i]); d.sortItems() }
+        if let i = d.items.firstIndex(where: { $0.id == id }) { apply(&d.items[i]) }
+        else if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { apply(&d.tomorrow![i]) }
         else if let i = d.backlog?.firstIndex(where: { $0.id == id }) { apply(&d.backlog![i]) }
         else { return }
+        d.sortItems(); d.save(); reloadTodos()
+        if var b = self.block, b.todoId == id {      // edited while it's running
+            if let task { b.task = task }
+            if let apps { b.apps = apps }
+            self.block = b; persist()
+        }
+    }
+    func deleteTodo(_ id: String) {
+        var d = TodoDoc.load()
+        d.items.removeAll { $0.id == id }; d.tomorrow?.removeAll { $0.id == id }
         d.save(); reloadTodos()
-        if let task, var b = self.block, b.todoId == id { b.task = task; self.block = b; persist() }   // renamed while running
     }
-    func deleteTodo(_ id: String) { var d = TodoDoc.load(); d.items.removeAll { $0.id == id }; d.save(); reloadTodos() }
-    func dropFromBacklog(_ id: String) {
-        var d = TodoDoc.load(); d.backlog?.removeAll { $0.id == id }; d.save(); reloadTodos()
+    /// Moves a to-do between today and tomorrow (keeping its time).
+    func move(_ id: String, to day: PlanDay) {
+        var d = TodoDoc.load()
+        guard let t = (d.items + (d.tomorrow ?? [])).first(where: { $0.id == id }) else { return }
+        d.items.removeAll { $0.id == id }; d.tomorrow?.removeAll { $0.id == id }
+        d.edit(day) { $0.append(t) }
+        d.save(); reloadTodos()
     }
+    func addFromBacklog(_ t: Todo) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let start = soonestSlot(minutes: t.minutes)
+            Task { @MainActor in
+                var d = TodoDoc.load()
+                d.backlog?.removeAll { $0.id == t.id }
+                var item = t; item.from = nil; item.start = start; item.done = false; item.why = ""
+                d.items.append(item); d.sortItems(); d.save(); self.reloadTodos()
+            }
+        }
+    }
+    func dropFromBacklog(_ id: String) { var d = TodoDoc.load(); d.backlog?.removeAll { $0.id == id }; d.save(); reloadTodos() }
     func clearBacklog() { var d = TodoDoc.load(); d.backlog = []; d.save(); reloadTodos() }
-
-    func presetFor(_ name: String) -> Preset? {
-        cfg.blocks.first { $0.name == name } ??
-        cfg.blocks.first { $0.name.lowercased().contains(name.lowercased().split(separator: " ").first.map(String.init) ?? name.lowercased()) }
+    func clearDay(_ day: PlanDay = .today) {
+        var d = TodoDoc.load()
+        if day == .today { d.items = []; d.chat = [] } else { d.tomorrow = [] }
+        d.save(); reloadTodos()
     }
 
-    // MARK: blocks
-    func startBlock(_ p: Preset, minutes: Int? = nil, task: String? = nil, todoId: String? = nil, apps: [String]? = nil) {
-        if block?.kind == "focus" { stopBlock(completed: false, silent: true) }
-        let m = minutes ?? p.minutes
+    // MARK: repeating sessions
+
+    var routines: [Routine] { cfg.routines ?? [] }
+    func routine(for t: Todo) -> Routine? { t.isRoutine ? routines.first { $0.id == t.ref } : nil }
+
+    /// Makes a to-do repeat on these days (1 = Sunday), or stop repeating with nil/empty.
+    func setRepeat(_ t: Todo, days: [Int]?) {
+        var list = routines
+        var d = TodoDoc.load()
+        func mark(_ source: String?, _ ref: String?) {
+            if let i = d.items.firstIndex(where: { $0.id == t.id }) { d.items[i].source = source; d.items[i].ref = ref }
+            if let i = d.tomorrow?.firstIndex(where: { $0.id == t.id }) { d.tomorrow![i].source = source; d.tomorrow![i].ref = ref }
+        }
+        if let days, !days.isEmpty {
+            let id = t.isRoutine ? (t.ref ?? Todo.newId()) : Todo.newId()
+            let r = Routine(id: id, task: t.task, minutes: t.minutes, start: (t.start ?? "").isEmpty ? "09:00" : t.start!, days: days.sorted(), apps: t.apps)
+            if let i = list.firstIndex(where: { $0.id == id }) { list[i] = r } else { list.append(r) }
+            mark("routine", id)
+        } else if let ref = t.ref {
+            list.removeAll { $0.id == ref }
+            mark(nil, nil)
+        }
+        d.save()
+        saveRoutines(list)
+        reloadTodos()
+    }
+    func deleteRoutine(_ id: String) { saveRoutines(routines.filter { $0.id != id }) }
+    private func saveRoutines(_ list: [Routine]) {
+        let arr = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(list))) ?? []
+        editConfig { $0["routines"] = arr }
+        reloadConfig()
+    }
+
+    // MARK: sessions
+
+    /// Starts a session. Its apps come from the to-do, else a task rule, else what you used last time, else your
+    /// lock-in apps. Everything else gets covered until it ends.
+    func startSession(task: String?, minutes: Int, apps: [String]? = nil, rule: String? = nil, todoId: String? = nil) {
+        if block?.kind == "focus" { stopBlock(completed: false, silent: true, how: "replaced") }
+        let m = min(max(minutes, 1), 480)
+        var allowed = apps
+        var ruleName = rule
+        if allowed == nil, let rule, let r = cfg.blocks.first(where: { $0.name == rule }), !(r.apps ?? []).isEmpty { allowed = r.apps }
+        if allowed == nil, let task, !task.isEmpty {
+            let match = TaskMatch.apps(for: task, cfg: cfg)
+            allowed = match.apps; ruleName = ruleName ?? match.rule
+        }
+        let apps = allowed ?? cfg.lockin_apps ?? []
         let t = Date().timeIntervalSince1970
-        block = ActiveBlock(kind: "focus", name: p.name, task: task, todoId: todoId, started: t, ends: t + Double(m * 60), minutes: m,
-                            offSeconds: 0, apps: apps)
-        driftSince = nil; lastNudge = nil; snoozeUntil = .distantPast; snoozedSites = [:]; lastOnTask = nil; drifting = false
-        appendLog(["type": "block_start", "name": p.name, "minutes": m, "task": task ?? ""])
+        block = ActiveBlock(kind: "focus", name: ruleName ?? task ?? "Focus", task: task, todoId: todoId, started: t,
+                            ends: t + Double(m * 60), minutes: m, offSeconds: 0, apps: apps, rule: ruleName)
+        driftSince = nil; lastNudge = nil; snoozeUntil = .distantPast; snoozedSites = [:]; lastOnTask = nil; drifting = false; blocked = nil
+        appendLog(["type": "block_start", "name": block!.name, "minutes": m, "task": task ?? "", "apps": apps])
         persist()
-        show(Card(icon: "scope", tint: "green", title: task ?? p.name, subtitle: "\(m) minutes · phone away, one thing at a time"), close: 2.6)
+        if AppState.load().plan_shown != today() { passGate(how: "session") }   // starting work counts as starting the day
+        let names = apps.prefix(3).joined(separator: ", ") + (apps.count > 3 ? " +\(apps.count - 3)" : "")
+        show(Card(icon: "lock.fill", tint: "green", title: task ?? "Locked in",
+                  subtitle: "\(m) min · " + (apps.isEmpty ? "only your always-fine apps" : names)), close: 2.6)
         play("Tink", volume: 0.35)
     }
 
-    /// A block with no name: just a length and the apps you'll use. Everything else gets covered.
-    func startQuick(minutes: Int, apps: [String]) {
-        UserDefaults.standard.set(apps, forKey: "quickApps")
-        startBlock(Preset(name: "Quick focus", minutes: minutes), minutes: minutes, task: apps.isEmpty ? nil : apps.joined(separator: ", "), apps: apps)
-        if let first = apps.first { lastOnTask = (first, "") }
-    }
-    var quickApps: [String] { UserDefaults.standard.stringArray(forKey: "quickApps") ?? [] }
-
     func startTodo(_ t: Todo, minutes: Int? = nil) {
-        guard let p = presetFor(t.block) ?? cfg.blocks.first else { return }
-        startBlock(p, minutes: minutes ?? t.left, task: t.task, todoId: minutes == nil ? t.id : nil)
+        startSession(task: t.task, minutes: minutes ?? t.left, apps: t.apps, rule: t.block.isEmpty ? nil : t.block,
+                     todoId: minutes == nil ? t.id : nil)
+    }
+    /// No task, just a length: your lock-in apps only.
+    func startQuick(minutes: Int) { startSession(task: nil, minutes: minutes, apps: cfg.lockin_apps ?? []) }
+    /// lockin://start?block=Name: a task rule by name (kept from v1).
+    func startBlock(_ p: Preset, minutes: Int? = nil, task: String? = nil) {
+        startSession(task: task ?? p.name, minutes: minutes ?? p.minutes, apps: (p.apps ?? []).isEmpty ? nil : p.apps, rule: p.name)
+    }
+    func presetFor(_ name: String) -> Preset? {
+        let n = name.lowercased()
+        guard !n.isEmpty else { return nil }
+        return cfg.blocks.first { $0.name.lowercased() == n } ?? TaskMatch.rule(for: name, in: cfg.blocks)
     }
 
     func startBreak() {
@@ -224,47 +364,95 @@ final class Engine: ObservableObject {
 
     func addFive() { if var b = block { b.ends += 300; b.minutes += 5; block = b; persist() } }
 
-    func stopBlock(completed: Bool, silent: Bool = false) {
+    /// Ends the session. `completed` = the timer ran out; anything else is ending early (it still counts its minutes).
+    func stopBlock(completed: Bool, silent: Bool = false, how: String = "stopped") {
         guard let b = block else { return }
-        block = nil; blocked = nil; drifting = false; lastBlockEnd = Date(); persist()
+        block = nil; blocked = nil; drifting = false; lastBlockEnd = Date(); statsCache = nil; persist()
         if b.kind == "break" {
             if !silent {
                 let n = nextTodo
                 show(Card(icon: "cup.and.saucer.fill", tint: "orange", title: "Break's over",
-                          subtitle: n.map { "Next: \($0.task)" } ?? "Ready for another block?",
-                          buttons: [CardButton(label: "Not yet", action: .dismiss)] + (n != nil ? [CardButton(label: "Start next", action: .startNext, primary: true)] : [CardButton(label: "Plan my day", action: .openPlanner, primary: true)])))
+                          subtitle: n.map { "Next: \($0.task)" } ?? "Ready for another session?",
+                          buttons: [CardButton(label: "Not yet", action: .dismiss)] + (n != nil ? [CardButton(label: "Lock in", action: .startNext, primary: true)] : [CardButton(label: "Plan", action: .openPlanner, primary: true)])))
             }
             return
         }
         let elapsed = Int((Date().timeIntervalSince1970 - b.started) / 60)
         let focused = max(0, elapsed - Int(b.offSeconds / 60))
-        appendLog(["type": "block_end", "name": b.name, "task": b.task ?? "", "completed": completed, "planned_min": b.minutes,
-                   "elapsed_min": elapsed, "focused_min": focused])
+        appendLog(["type": "block_end", "name": b.name, "task": b.task ?? "", "completed": completed, "how": completed ? "timer" : how,
+                   "planned_min": b.minutes, "elapsed_min": elapsed, "focused_min": focused, "apps": b.apps ?? []])
         if let id = b.todoId {
             if completed { setDone(id, true) }
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
         }
-        guard !silent else { return }
+        let before = todayMinutes
         let st = stats()
-        let goal = st.goal, today = st.todayMinutes
-        let hitGoal = today >= goal && today - focused < goal   // this block is the one that made today count
+        todayMinutes = st.todayMinutes
+        guard !silent else { return }
+        let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
+        let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
         if completed {
+            if hitGoal, let m = milestone(st.streak) {
+                play("Hero", volume: 0.55)
+                show(Card(icon: "flame.fill", tint: "orange", title: "\(st.streak)-day streak", subtitle: m, buttons: breakButtons))
+                return
+            }
+            if perfectDay() {
+                play("Hero", volume: 0.5)
+                show(Card(icon: "star.fill", tint: "orange", title: "Perfect day", subtitle: "Every session you planned, done · \(fmtMinutes(st.todayMinutes)) focused",
+                          buttons: [CardButton(label: "Plan tomorrow", action: .planTomorrow), CardButton(label: "Nice", action: .dismiss, primary: true)]))
+                return
+            }
             play(hitGoal ? "Hero" : "Glass", volume: hitGoal ? 0.5 : 0.45)
-            let line = hitGoal ? "Today counts · \(st.streak)-day streak" : "\(fmtMinutes(today)) today" + (today < goal ? " · \(goal - today) min to count the day" : "")
+            let line = hitGoal ? "Today counts · \(st.streak)-day streak" : "\(fmtMinutes(st.todayMinutes)) today" + (st.todayMinutes < goal ? " · \(goal - st.todayMinutes) min to make today count" : "")
             show(Card(icon: hitGoal ? "flame.fill" : "checkmark.circle.fill", tint: hitGoal ? "orange" : "green",
-                      title: hitGoal ? "Day done. \(b.task ?? b.name)" : (b.task ?? b.name),
-                      subtitle: "\(focused) min focused · \(line)",
-                      buttons: [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]))
+                      title: hitGoal ? "Today counts. \(b.task ?? "Session") done" : (b.task ?? "Session done"),
+                      subtitle: "\(focused) min focused · \(line)", buttons: breakButtons))
         } else if focused >= 5 {
-            show(Card(icon: "stop.circle.fill", tint: "white", title: "Stopped", subtitle: "\(focused) min focused. That still counts · \(fmtMinutes(today)) today"), close: 3)
+            show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early",
+                      subtitle: "\(focused) of \(b.minutes) min. The minutes still count · \(fmtMinutes(st.todayMinutes)) today"), close: 3.5)
         } else {
-            show(Card(icon: "stop.circle.fill", tint: "white", title: "Stopped", subtitle: "Restarting is the skill. Try 10 minutes next."), close: 3)
+            show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early", subtitle: "Restarting is the skill. Try 10 minutes next."), close: 3)
         }
+    }
+
+    /// A streak milestone worth its own card (once per run of the streak), with its line.
+    private func milestone(_ streak: Int) -> String? {
+        let lines = [3: "Three days in a row. It's turning into a habit.", 7: "A full week. Keep it going.",
+                     14: "Two weeks straight.", 30: "A month of showing up.", 50: "Fifty days.", 100: "A hundred days in a row.",
+                     200: "Two hundred days.", 365: "A whole year."]
+        guard let line = lines[streak], UserDefaults.standard.integer(forKey: "milestone-" + today()) != streak else { return nil }
+        UserDefaults.standard.set(streak, forKey: "milestone-" + today())
+        return line
+    }
+    /// Every session planned today is done (two or more), once a day.
+    private func perfectDay() -> Bool {
+        let key = "perfect-" + today()
+        guard todos.count >= 2, todos.allSatisfy(\.isDone), !UserDefaults.standard.bool(forKey: key) else { return false }
+        UserDefaults.standard.set(true, forKey: key)
+        return true
     }
 
     private func persist() { var s = AppState.load(); s.active = block; s.save() }
 
+    /// lockin quit while a session runs: noted (it shows in the recap), and the session picks back up on relaunch.
+    func noteQuit() {
+        guard let b = block, b.kind == "focus" else { return }
+        var s = AppState.load(); s.quit_at = Date().timeIntervalSince1970; s.active = b; s.save()
+        appendLog(["type": "quit_during_session", "name": b.name, "task": b.task ?? ""])
+    }
+
+    // MARK: the morning screen
+
+    func passGate(how: String, reason: String? = nil) {
+        var s = AppState.load(); s.plan_shown = today(); s.save()
+        var ev: [String: Any] = ["type": how == "skip" ? "gate_skipped" : "gate_passed", "how": how, "planned": todos.filter { !$0.isDone }.count]
+        if let reason { ev["reason"] = String(reason.prefix(300)) }
+        appendLog(ev)
+    }
+
     // MARK: cards
+
     func show(_ c: Card, close: Double? = nil) {
         closeTask?.cancel()
         statsShown = false
@@ -285,16 +473,43 @@ final class Engine: ObservableObject {
         case .startNext: if let t = nextTodo { startTodo(t) } else { Planner.shared.open() }
         case .startTen: if let t = nextTodo { startTodo(t, minutes: 10) }
         case .openPlanner: Planner.shared.open()
+        case .planTomorrow: planDay = .tomorrow; Planner.shared.open(day: .tomorrow)
         case .stop: stopBlock(completed: false)
+        case .confirmStop:
+            show(Card(icon: "exclamationmark.lock.fill", tint: "red", title: "End this session early?",
+                      subtitle: "It counts as ended early in your stats. \(fmtTime(remaining)) left.",
+                      buttons: [CardButton(label: "End it", action: .stop), CardButton(label: "Keep going", action: .dismiss, primary: true)]), close: 10)
         case .addFive: addFive()
         case .openStats: Planner.shared.open(tab: .stats)
         case .startGoal:
-            let need = max(10, (cfg.stats_goal ?? 25) - stats().todayMinutes)
-            if let t = nextTodo { startTodo(t, minutes: max(need, 25)) }
-            else if let p = cfg.blocks.first { startBlock(p, minutes: max(need, 25)) }
-            else { Planner.shared.open() }
+            let need = max(10, goal - todayMinutes)
+            if let t = nextTodo { startTodo(t, minutes: max(need, 25)) } else { startQuick(minutes: max(need, 25)) }
+        case .startTodo(let id): if let t = todos.first(where: { $0.id == id }) { startTodo(t) }
+        case .snoozeTodo(let id):
+            if let t = todos.first(where: { $0.id == id }) {
+                appendLog(["type": "postponed", "task": t.task, "minutes": 10])
+                updateTodo(id, start: hhmm(Date().addingTimeInterval(600)))
+            }
+        case .lockInEvent(let id):
+            if let ev = events.first(where: { $0.id == id }) {
+                startSession(task: ev.title, minutes: max(5, Int(ev.end.timeIntervalSince(Date()) / 60)))
+            }
+        case .skipEvent(let id):
+            if let ev = events.first(where: { $0.id == id }) { appendLog(["type": "event_skipped", "what": ev.title]) }
+        case .neverEvent(let id):
+            if let ev = events.first(where: { $0.id == id }) { ignoreEvent(ev.title) }
         }
     }
+
+    func ignoreEvent(_ title: String) {
+        editConfig { raw in
+            var list = raw["calendar_ignore"] as? [String] ?? []
+            if !list.contains(where: { $0.caseInsensitiveCompare(title) == .orderedSame }) { list.append(title) }
+            raw["calendar_ignore"] = list
+        }
+        reloadConfig()
+    }
+    func isIgnored(_ ev: CalEvent) -> Bool { (cfg.calendar_ignore ?? []).contains { $0.caseInsensitiveCompare(ev.title) == .orderedSame } }
 
     func showStats() { card = nil; statsShown = true }
 
@@ -314,21 +529,32 @@ final class Engine: ObservableObject {
         s.volume = volume; s.play()
     }
 
-    func stats() -> Stats { Stats.load(goal: cfg.stats_goal ?? 25, weekGoal: cfg.stats_week_goal ?? 5, live: block) }
+    /// Stats for the views. Reading the log is cheap but views redraw every second, so it's kept for 20 seconds.
+    private var statsCache: (at: Date, session: Double?, value: Stats)?
+    func stats() -> Stats {
+        if let c = statsCache, Date().timeIntervalSince(c.at) < 20, c.session == block?.started { return c.value }
+        let s = Stats.load(goal: goal, weekGoal: cfg.stats_week_goal ?? 5, live: block)
+        statsCache = (Date(), block?.started, s)
+        return s
+    }
+    /// Today's minutes from finished sessions only (what "today counts" and earning free time go by).
+    func finishedToday() -> Int { Stats.load(goal: goal, weekGoal: cfg.stats_week_goal ?? 5, live: nil).todayMinutes }
 
     func tapIsland() {
         guard let b = block else { return }
         if card != nil { card = nil; return }
-        show(Card(icon: isBreak ? "cup.and.saucer.fill" : "scope", tint: isBreak ? "orange" : (drifting ? "red" : "green"),
-                  title: isBreak ? "Break" : (b.task ?? b.name), subtitle: "\(fmtTime(remaining)) left · \(b.name)",
-                  buttons: [CardButton(label: "Stop", action: .stop), CardButton(label: "+5 min", action: .addFive),
-                            CardButton(label: "Keep going", action: .dismiss, primary: true)]), close: 6)
+        let stop = CardButton(label: locked && !isBreak ? "End early…" : "Stop", action: locked && !isBreak ? .confirmStop : .stop)
+        show(Card(icon: isBreak ? "cup.and.saucer.fill" : "lock.fill", tint: isBreak ? "orange" : (drifting ? "red" : "green"),
+                  title: isBreak ? "Break" : (b.task ?? "Locked in"), subtitle: "\(fmtTime(remaining)) left" + (isBreak ? "" : " · \((b.apps ?? []).prefix(3).joined(separator: ", "))"),
+                  buttons: [stop, CardButton(label: "+5 min", action: .addFive), CardButton(label: "Keep going", action: .dismiss, primary: true)]), close: 6)
     }
 
     // MARK: loop
+
     private func tick() {
         now = Date()
         if let b = block, now.timeIntervalSince1970 >= b.ends { stopBlock(completed: b.kind == "focus"); return }
+        if let c = card, let at = c.countdown, now >= at, let action = c.onTimeout { perform(action); return }
         checkIns()
     }
 
@@ -338,7 +564,7 @@ final class Engine: ObservableObject {
         if progress >= 0.5, checkedIn.half != b.started {
             checkedIn.half = b.started
             let focused = max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
-            showFlash(drifting ? "Halfway. Come back to \(b.task ?? b.name)" : "Halfway · \(focused) min focused so far",
+            showFlash(drifting ? "Halfway. Come back to \(b.task ?? "it")" : "Halfway · \(focused) min focused so far",
                       icon: "circle.lefthalf.filled", tint: drifting ? "red" : "green")
         } else if remaining <= 60, checkedIn.last != b.started {
             checkedIn.last = b.started
@@ -347,20 +573,29 @@ final class Engine: ObservableObject {
     }
 
     private func check() {
-        guard let b = block, b.kind == "focus", let p = preset, !checking else { if block == nil || isBreak { blocked = nil }; return }
-        checking = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let ctx = Detect.context()
-            let idle = Detect.idleSeconds()
-            let frame = Detect.windowFrame(of: ctx.app)
-            Task { @MainActor in self.evaluate(ctx, idle: idle, frame: frame, preset: p); self.checking = false }
-        }
+        guard !checking, !gateShown else { if gateShown { blocked = nil }; return }
+        if let b = block, b.kind == "focus", let p = preset {
+            checking = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ctx = Detect.context()
+                let idle = Detect.idleSeconds()
+                let frame = Detect.windowFrame(of: ctx.app)
+                Task { @MainActor in self.evaluate(ctx, idle: idle, frame: frame, preset: p); self.checking = false }
+            }
+        } else if block == nil, earning {
+            checking = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ctx = Detect.context(terminals: false)
+                let frame = Detect.windowFrame(of: ctx.app)
+                Task { @MainActor in self.evaluateFree(ctx, frame: frame); self.checking = false }
+            }
+        } else if blocked != nil { blocked = nil }
     }
 
     private func classify(_ c: FrontContext, _ p: Preset) -> (String, String?) {
-        if anyIn(c.app, cfg.distractions.apps) != nil { return ("off", c.app) }
+        if anyIn(c.app, cfg.distractions.apps) != nil, anyIn(c.app, p.apps) == nil { return ("off", c.app) }
         if Detect.browsers[c.app] != nil {
-            if anyIn(c.url + " " + c.title, p.sites) != nil { return ("on", nil) }   // block's own sites first
+            if anyIn(c.url + " " + c.title, p.sites) != nil { return ("on", nil) }   // the rule's own sites first
             if let hit = anyIn(c.url + " " + c.title, cfg.distractions.sites) { return ("off", hit) }
             return ("neutral", nil)
         }
@@ -369,7 +604,7 @@ final class Engine: ObservableObject {
             return ("off", "Claude session in \((proj as NSString).lastPathComponent)")
         }
         if Detect.terminals.contains(c.app) {
-            return p.terminal_ok ?? true ? ("on", nil) : ("off", "\(c.app) isn't part of \(p.short)")
+            return p.terminal_ok ?? true ? ("on", nil) : ("off", "\(c.app) isn't part of this session")
         }
         if anyIn(c.app, p.apps) != nil || anyIn(c.app, cfg.always_ok_apps) != nil { return ("on", nil) }
         return ("neutral", nil)
@@ -377,19 +612,17 @@ final class Engine: ObservableObject {
 
     private func evaluate(_ c: FrontContext, idle: Double, frame: NSRect?, preset p: Preset) {
         guard var b = block, b.kind == "focus" else { return }
-        // cover distracting sites (tab stays open underneath)
-        // a site the block explicitly allows wins over the cover (e.g. a NeetCode video on YouTube during LeetCode)
+        // A site the rule explicitly allows wins over the cover (e.g. a NeetCode video on YouTube during LeetCode).
         let allowed = anyIn(c.url + " " + c.title, p.sites) != nil
         var (state, what) = classify(c, p)
         let appSnoozed = (snoozedSites["app:" + c.app] ?? .distantPast) >= Date()
-        if blockingMode != "nudge", Detect.browsers[c.app] != nil, !allowed, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
+        if Detect.browsers[c.app] != nil, !allowed, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
             cover(Blocked(site: site, app: c.app, frame: frame, kind: .site))
-        } else if blockingMode != "nudge", isDistractingApp(c.app, p), !appSnoozed {
+        } else if isDistractingApp(c.app, p), !appSnoozed {
             cover(Blocked(site: "", app: c.app, frame: frame, kind: .app))
         } else if strictViolation(c, p, state), !appSnoozed {
-            // "only these apps" blocks: anything else gets the cover too
             cover(Blocked(site: "", app: c.app, frame: frame, kind: .strict))
-            if state != "off" { state = "off"; what = "\(c.app) isn't part of this block" }
+            if state != "off" { state = "off"; what = "\(c.app) isn't part of this session" }
         } else if blocked != nil { blocked = nil }
 
         if state == "on", anyIn(c.app, cfg.always_ok_apps) == nil { lastOnTask = (c.app, c.url) }
@@ -412,23 +645,41 @@ final class Engine: ObservableObject {
         if due, blocked == nil {
             if lastNudge == nil { appendLog(["type": "drift", "name": b.name, "what": what ?? ""]); play("Bottle", volume: 0.3) }
             lastNudge = Date()
-            show(Card(icon: "eye.fill", tint: "red", title: what ?? "Off task",
-                      subtitle: "\(fmtTime(remaining)) left in \(b.task ?? b.name)",
+            show(Card(icon: away ? "moon.zzz.fill" : "eye.fill", tint: "red", title: what ?? "Off task",
+                      subtitle: "\(fmtTime(remaining)) left in \(b.task ?? "this session")",
                       buttons: [CardButton(label: "5 more min", action: .snoozeDrift), CardButton(label: "Back to it", action: .backToIt, primary: true)]), close: 8)
         }
     }
 
-    /// Shows the cover, or moves it along with its window. A new cover is logged like a drift (the recap counts it)
-    /// and plays a soft sound, at most every 30 seconds.
+    /// Outside sessions, before today counts: distracting sites and apps get the cover.
+    private func evaluateFree(_ c: FrontContext, frame: NSRect?) {
+        guard block == nil, earning else { if blocked != nil { blocked = nil }; return }
+        if Detect.browsers[c.app] != nil, let site = anyIn(c.url, cfg.block_sites), (snoozedSites[site] ?? .distantPast) < Date() {
+            cover(Blocked(site: site, app: c.app, frame: frame, kind: .earn))
+        } else if !neverCover(c.app), anyIn(c.app, cfg.distractions.apps) != nil, (snoozedSites["app:" + c.app] ?? .distantPast) < Date() {
+            cover(Blocked(site: "", app: c.app, frame: frame, kind: .earn))
+        } else if blocked != nil { blocked = nil }
+    }
+
+    /// Shows the cover, or moves it along with its window. A new cover is logged (the recap counts it) and plays a
+    /// soft sound, at most every 30 seconds. In Locked mode a covered app gets hidden a moment later.
     private func cover(_ new: Blocked) {
-        if blocked?.app != new.app || blocked?.site != new.site {
-            appendLog(["type": "blocked", "name": block?.name ?? "", "what": new.site.isEmpty ? new.app : new.site])
+        let fresh = blocked?.app != new.app || blocked?.site != new.site || blocked?.kind != new.kind
+        if fresh {
+            appendLog(["type": "blocked", "name": block?.name ?? "free time", "what": new.site.isEmpty ? new.app : new.site])
             coverShownAt = Date()
             if cfg.sounds ?? true, cfg.cover_sound ?? true, Date().timeIntervalSince(lastCoverSound) > 30, let s = NSSound(named: "Funk") {
                 lastCoverSound = Date(); s.volume = 0.5; s.play()
             }
         }
         blocked = new
+        if fresh, locked, new.site.isEmpty, new.kind != .site {
+            let app = new.app
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self, self.blocked?.app == app, self.blocked?.site.isEmpty == true else { return }
+                self.hideBlockedApp()
+            }
+        }
     }
 
     /// Apps that can never be covered: lockin itself, macOS's own UI, and the always-fine list.
@@ -436,26 +687,38 @@ final class Engine: ObservableObject {
         app.isEmpty || app == selfAppName || Detect.systemApps.contains(app) || anyIn(app, cfg.always_ok_apps) != nil
     }
 
-    /// An app on the distracting list that this block doesn't explicitly allow.
+    /// An app on the distracting list that this session doesn't explicitly allow.
     private func isDistractingApp(_ app: String, _ p: Preset) -> Bool {
         !neverCover(app) && anyIn(app, cfg.distractions.apps) != nil && anyIn(app, p.apps) == nil
     }
 
-    /// In a strict block, is the front app/page outside the allowed list? A browser you picked is fine on any page
-    /// that isn't a distraction; lockin's own windows, system UI and always-fine apps never count.
+    /// Is the front app outside the session's apps? A browser you allowed is fine on any page that isn't a
+    /// distraction; lockin's own windows, system UI and always-fine apps never count.
     private func strictViolation(_ c: FrontContext, _ p: Preset, _ state: String) -> Bool {
-        guard p.strict == true, state != "on", !neverCover(c.app) else { return false }
+        guard state != "on", !neverCover(c.app) else { return false }
         if Detect.browsers[c.app] != nil, state == "neutral", anyIn(c.app, p.apps) != nil { return false }
         return true
     }
 
-    // MARK: blocker actions
-    func snoozeSite() {
-        guard let b = blocked, snoozesLeft > 0, snoozeWaitLeft == 0 else { return }
-        let key = b.kind == .site ? b.site : "app:" + b.app
+    // MARK: cover actions
+
+    /// "Give me 5 min": after the wait, while passes last. Logged either way.
+    func takePass() {
+        guard let b = blocked, passesLeft > 0, snoozeWaitLeft == 0 else { return }
+        let key = b.site.isEmpty ? "app:" + b.app : b.site
         snoozedSites[key] = Date().addingTimeInterval(300)
-        appendLog(["type": "drift", "name": block?.name ?? "", "what": "\(b.kind == .site ? b.site : b.app) (took 5)"])
-        if blockingMode != "nudge", var a = block { a.snoozes = (a.snoozes ?? 0) + 1; block = a; persist() }
+        appendLog(["type": "pass", "what": b.site.isEmpty ? b.app : b.site, "during": b.kind == .earn ? "free time" : (block?.name ?? "")])
+        if b.kind == .earn { UserDefaults.standard.set(freePassesUsed + 1, forKey: freePassesKey) }
+        else if var a = block { a.snoozes = (a.snoozes ?? 0) + 1; block = a; persist() }
+        blocked = nil
+    }
+    /// A work app you need that wasn't part of the session: added for the rest of it (and remembered for the task).
+    func addBlockedAppToSession() {
+        guard canAddBlockedApp, snoozeWaitLeft == 0, let b = blocked, var a = block else { return }
+        let apps = (a.apps ?? []) + [b.app]
+        a.apps = apps; block = a; persist()
+        appendLog(["type": "app_added", "app": b.app, "task": a.task ?? ""])
+        if let id = a.todoId { updateTodo(id, apps: apps) }
         blocked = nil
     }
     /// Hides the covered app (it keeps running) and goes back to the last on-task app.
@@ -467,17 +730,17 @@ final class Engine: ObservableObject {
     func closeBlockedTab() {
         guard let app = blocked?.app else { return }
         Detect.osa(Detect.browsers[app] == "safari" ? "tell application \"Safari\" to close current tab of front window"
-                                                   : "tell application \"\(app)\" to close active tab of front window")
+                                                   : "tell application \"\(Detect.escape(app))\" to close active tab of front window")
         blocked = nil
     }
     func backToWork() {
         let app = blocked?.app ?? Detect.frontApp()
         blocked = nil
         if Detect.browsers[app] == "chromium", let sites = preset?.sites, !sites.isEmpty {
-            let keys = sites.map { "\"\($0.replacingOccurrences(of: "\"", with: ""))\"" }.joined(separator: ",")
+            let keys = sites.map { "\"\(Detect.escape($0))\"" }.joined(separator: ",")
             let src = """
             set keys to {\(keys)}
-            tell application "\(app)"
+            tell application "\(Detect.escape(app))"
               repeat with w in windows
                 set i to 0
                 repeat with t in tabs of w
@@ -502,20 +765,22 @@ final class Engine: ObservableObject {
         }
         if lastOnTask == nil, let p = preset, let target = NSWorkspace.shared.runningApplications.first(where: { r in
             r.activationPolicy == .regular && anyIn(r.localizedName ?? "", p.apps) != nil && r.localizedName != app }) {
-            target.activate()   // nothing on task yet this block: jump to one of its apps
+            target.activate()   // nothing on task yet this session: jump to one of its apps
             return
         }
         if let last = lastOnTask, !last.url.isEmpty, Detect.browsers[app] != nil {
-            Detect.osa("tell application \"\(app)\" to set URL of active tab of front window to \"\(last.url)\"")
+            Detect.osa("tell application \"\(Detect.escape(app))\" to set URL of active tab of front window to \"\(Detect.escape(last.url))\"")
             return
         }
-        if Detect.browsers[app] == "chromium" { Detect.osa("tell application \"\(app)\" to make new tab at end of tabs of front window") }
+        if Detect.browsers[app] == "chromium" { Detect.osa("tell application \"\(Detect.escape(app))\" to make new tab at end of tabs of front window") }
     }
 
     // MARK: to-dos
+
     func setDone(_ id: String, _ done: Bool) {
         var d = TodoDoc.load()
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].done = done }
+        if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { d.tomorrow![i].done = done }
         d.save(); reloadTodos()
     }
     func addSpent(_ id: String, _ minutes: Int) {
@@ -524,15 +789,27 @@ final class Engine: ObservableObject {
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].spent = (d.items[i].spent ?? 0) + minutes }
         d.save(); reloadTodos()
     }
-    func clearDay() { var d = TodoDoc.load(); d.items = []; d.chat = []; d.date = today(); d.save(); reloadTodos() }
 
-    func sendToPlanner(_ text: String) {
+    /// Sends what you typed to the AI planner, which rewrites today's (or tomorrow's) plan; new tasks get their apps here.
+    func sendToPlanner(_ text: String, day: PlanDay = .today) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !planning else { return }
         planning = true; planError = nil
         chat.append(ChatMsg(role: "user", text: t))
+        _ = TodoDoc.load()     // roll the day over before the helper reads the file
+        let cfg = self.cfg
         DispatchQueue.global(qos: .userInitiated).async {
-            let out = runCoach(["todos"], input: t)
+            let out = runCoach(["todos", day.rawValue], input: t)
+            let history = TaskMatch.history()
+            var d = TodoDoc.load()
+            var changed = false
+            d.edit(day) { list in
+                for i in list.indices where list[i].apps == nil {
+                    let m = TaskMatch.apps(for: list[i].task, cfg: cfg, history: history)
+                    list[i].apps = m.apps; list[i].block = m.rule ?? ""; changed = true
+                }
+            }
+            if changed { d.save() }
             Task { @MainActor in
                 self.planning = false
                 let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
@@ -542,7 +819,8 @@ final class Engine: ObservableObject {
         }
     }
 
-    // MARK: morning plan, nudges, recap
+    // MARK: morning plan, reminders, recap
+
     func planLines() -> [CardLine] {
         let text = runCoach(["plan"])
         var lines: [CardLine] = []
@@ -559,9 +837,8 @@ final class Engine: ObservableObject {
                 }
                 if let r = t.range(of: " due ") {
                     deadline = true; trailing = String(t[r.upperBound...]).replacingOccurrences(of: "in ", with: "")
-                    t = String(t[..<r.lowerBound]).replacingOccurrences(of: ": coding test", with: "").replacingOccurrences(of: ":", with: "")
+                    t = String(t[..<r.lowerBound]).replacingOccurrences(of: ":", with: "")
                 }
-                if t.hasPrefix("Classes: ") { t = String(t.dropFirst(9)); trailing = "classes" }
                 lines.append(CardLine(text: t, trailing: trailing, deadline: deadline, time: time, calendar: calendar))
             } else { lines.append(CardLine(text: raw, bullet: false)) }
         }
@@ -573,9 +850,9 @@ final class Engine: ObservableObject {
         let title = morning ? "Good morning" : (h < 12 ? "Today" : h < 18 ? "Rest of today" : "Tonight")
         let n = nextTodo
         show(Card(icon: morning || h < 18 ? "sun.max.fill" : "moon.fill", tint: "orange", title: title, lines: planLines(),
-                  buttons: [CardButton(label: n == nil ? "Later" : "Plan my day", action: n == nil ? .dismiss : .openPlanner),
-                            n.map { CardButton(label: "Start: \($0.task.prefix(24))\($0.task.count > 24 ? "…" : "")", action: .startNext, primary: true) }
-                              ?? CardButton(label: "Plan my day", action: .openPlanner, primary: true)], autoClose: 30))
+                  buttons: [CardButton(label: n == nil ? "Later" : "Open plan", action: n == nil ? .dismiss : .openPlanner),
+                            n.map { CardButton(label: "Lock in: \($0.task.prefix(24))\($0.task.count > 24 ? "…" : "")", action: .startNext, primary: true) }
+                              ?? CardButton(label: "Plan", action: .openPlanner, primary: true)], autoClose: 30))
     }
 
     func showRecap() {
@@ -583,45 +860,89 @@ final class Engine: ObservableObject {
         var lines = text.split(separator: "\n").map { CardLine(text: String($0), bullet: false) }
         let st = stats()
         lines.append(CardLine(text: "This week: \(fmtMinutes(st.weekMinutes)) over \(st.weekDaysCounted) of \(st.weekGoal) days · streak \(st.streak)", bullet: false))
+        let planned = !tomorrow.isEmpty
         show(Card(icon: "chart.bar.fill", tint: "blue", title: "Today", subtitle: "\(fmtMinutes(st.todayMinutes)) focused",
-                  lines: lines, buttons: [CardButton(label: "Stats", action: .openStats), CardButton(label: "Nice", action: .dismiss, primary: true)]))
+                  lines: lines, buttons: [CardButton(label: "Stats", action: .openStats),
+                                          planned ? CardButton(label: "Nice", action: .dismiss, primary: true)
+                                                  : CardButton(label: "Plan tomorrow", action: .planTomorrow, primary: true)]))
     }
 
     private func minute() {
-        if today() != lastDay { lastDay = today(); reloadTodos() }   // midnight: fresh day, leftovers to backlog
-        morningCheck(); idleNudge()
+        if today() != lastDay {          // 4am: a fresh day; leftovers to the backlog, tomorrow's plan becomes today's
+            lastDay = today(); reloadTodos(); askedEvents = []; promptedTodos = []
+        }
+        minuteCount += 1
+        if minuteCount % 10 == 0 { refreshEvents() }
+        todayMinutes = finishedToday()
+        morningCheck(); duePlanned(); dueEvents(); idleNudge()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
         if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }
     }
 
+    /// A planned session's time came: a countdown in the notch, then it starts ("In 10 min" moves it).
+    private func duePlanned() {
+        guard cfg.auto_start ?? true, block == nil, card == nil, !gateShown, !SetupWindow.needed else { return }
+        let t0 = Date()
+        guard let t = todos.first(where: { t in
+            guard !t.isDone, let s = parseHHMM(t.start ?? ""), !promptedTodos.contains(t.id + (t.start ?? "")) else { return false }
+            let d = t0.timeIntervalSince(s)
+            return d >= 0 && d < 120
+        }) else { return }
+        promptedTodos.insert(t.id + (t.start ?? ""))
+        play("Purr", volume: 0.35)
+        show(Card(icon: "lock.fill", tint: "green", title: t.task, subtitle: "Starting now · \(t.left) min · \((t.apps ?? []).prefix(3).joined(separator: ", "))",
+                  buttons: [CardButton(label: "In 10 min", action: .snoozeTodo(t.id)), CardButton(label: "Start", action: .startTodo(t.id), primary: true)],
+                  countdown: t0.addingTimeInterval(15), onTimeout: .startTodo(t.id)))
+    }
+
+    /// A calendar event is starting: ask (never jump in). "Never for this" is remembered by title.
+    private func dueEvents() {
+        guard (cfg.calendar_mode ?? "ask") != "off", card == nil, !gateShown else { return }
+        let t0 = Date()
+        guard let ev = events.first(where: { e in
+            !e.allDay && !askedEvents.contains(e.id) && !isIgnored(e) && t0 >= e.start && t0.timeIntervalSince(e.start) < 180 && e.end > t0
+        }) else { return }
+        askedEvents.insert(ev.id)
+        if todos.contains(where: { !$0.isDone && $0.start == ev.startHHMM }) { return }   // a planned session covers it
+        if block != nil { showFlash("\(ev.title) is starting (calendar)", icon: "calendar", tint: "blue"); return }
+        play("Purr", volume: 0.3)
+        let left = max(5, Int(ev.end.timeIntervalSince(t0) / 60))
+        show(Card(icon: "calendar", tint: "blue", title: ev.title,
+                  subtitle: "On your calendar until \(ev.end.formatted(date: .omitted, time: .shortened)). Lock in for it?",
+                  buttons: [CardButton(label: "Never for this", action: .neverEvent(ev.id)), CardButton(label: "Skip", action: .skipEvent(ev.id)),
+                            CardButton(label: "Lock in · \(left) min", action: .lockInEvent(ev.id), primary: true)]), close: 90)
+    }
+
     /// Once an evening, if today hasn't counted yet: one card, then silence until tomorrow.
     private func streakReminder() {
         let key = "streakReminderShown"
-        guard UserDefaults.standard.string(forKey: key) != today(), block == nil, card == nil, Detect.idleSeconds() < 120 else { return }
+        guard UserDefaults.standard.string(forKey: key) != today(), block == nil, card == nil, !gateShown, Detect.idleSeconds() < 120 else { return }
         if anyIn(Detect.frontApp(), ["zoom.us", "Microsoft Teams", "FaceTime", "Webex"]) != nil { return }
         let st = stats()
         guard st.todayMinutes < st.goal, st.streak > 0 || st.weekDaysCounted < st.weekGoal else { return }
         UserDefaults.standard.set(today(), forKey: key)
         let need = st.goal - st.todayMinutes
         let title = st.streak > 0 ? "Keep your \(st.streak)-day streak" : "Put today on the board"
-        let sub = st.todayMinutes > 0 ? "\(need) more minutes makes today count." : "One \(max(need, 25))-minute block makes today count. \(st.weekDaysCounted)/\(st.weekGoal) days this week."
+        let sub = st.todayMinutes > 0 ? "\(need) more minutes makes today count." : "One \(max(need, 25))-minute session makes today count. \(st.weekDaysCounted)/\(st.weekGoal) days this week."
         play("Purr", volume: 0.3)
         show(Card(icon: "flame.fill", tint: "orange", title: title, subtitle: sub,
-                  buttons: [CardButton(label: "Not tonight", action: .dismiss), CardButton(label: "Start \(max(need, 25)) min", action: .startGoal, primary: true)]), close: 30)
+                  buttons: [CardButton(label: "Not tonight", action: .dismiss), CardButton(label: "Lock in \(max(need, 25)) min", action: .startGoal, primary: true)]), close: 30)
     }
 
+    /// The first time you're at the Mac each day (after the morning hour): the full-screen plan, or the plan card if
+    /// the morning screen is off. Not while a session runs; starting one counts as starting the day.
     func morningCheck() {
         var s = AppState.load()
         guard s.plan_shown != today(), Calendar.current.component(.hour, from: Date()) >= (cfg.morning_hour ?? 5),
-              Detect.idleSeconds() < 90 else { return }
-        s.plan_shown = today(); s.save()
+              Detect.idleSeconds() < 90, !SetupWindow.needed, block == nil, !gateShown else { return }
         reloadTodos()
-        showPlan(morning: true)
+        if cfg.morning_gate ?? true { Gate.shared.show() }
+        else { s.plan_shown = today(); s.save(); showPlan(morning: true) }
     }
 
     private func idleNudge() {
-        guard block == nil, card == nil else { return }
+        guard block == nil, card == nil, !gateShown else { return }
         let h = Calendar.current.component(.hour, from: Date()), hours = cfg.active_hours ?? [8, 23]
         guard h >= hours[0], h < hours[1], Detect.idleSeconds() < 60 else { return }
         let gap = (cfg.idle_nudge_minutes ?? 40) * 60
@@ -630,14 +951,14 @@ final class Engine: ObservableObject {
         lastIdleNudge = Date()
         if let n = nextTodo {
             let left = todos.filter { !$0.isDone }.count
-            show(Card(icon: "arrow.right.circle.fill", tint: "blue", title: n.task,
-                      subtitle: "Up next · \(n.minutes) min · \(left) left today. Hard to start? Do 10 minutes.",
+            show(Card(icon: "arrow.right.circle.fill", tint: "green", title: n.task,
+                      subtitle: "Up next · \(n.left) min · \(left) left today. Hard to start? Do 10 minutes.",
                       buttons: [CardButton(label: "Later", action: .dismiss), CardButton(label: "Just 10 min", action: .startTen),
-                                CardButton(label: "Start", action: .startNext, primary: true)]), close: 25)
+                                CardButton(label: "Lock in", action: .startNext, primary: true)]), close: 25)
         } else {
-            show(Card(icon: "list.bullet.rectangle.fill", tint: "blue", title: "What's on your plate today?",
-                      subtitle: "Tell the planner and it'll line your day up around your classes.",
-                      buttons: [CardButton(label: "Later", action: .dismiss), CardButton(label: "Plan my day", action: .openPlanner, primary: true)]), close: 25)
+            show(Card(icon: "list.bullet.rectangle.fill", tint: "green", title: "What are you locking in on?",
+                      subtitle: "Nothing's planned. Type it in one line and lockin times it for you.",
+                      buttons: [CardButton(label: "Later", action: .dismiss), CardButton(label: "Plan", action: .openPlanner, primary: true)]), close: 25)
         }
     }
 }

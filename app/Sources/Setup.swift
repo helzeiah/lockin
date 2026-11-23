@@ -3,12 +3,12 @@ import EventKit
 import ServiceManagement
 import SwiftUI
 
-// One-time setup, like Opal or ScreenZen: pick what distracts you, how strict lockin is, grant the macOS
-// permissions in one place, set a daily goal. Runs on first launch (and again from General → Run setup again).
+// One-time setup: the apps you work in, what distracts you, how strict lockin is, the macOS permissions in one place,
+// and a daily goal. Runs on first launch, once more after a big update (version), and from Your day → Run setup again.
 @MainActor
 final class SetupWindow {
     static let shared = SetupWindow()
-    static let version = 1                       // bump to show setup again after a big change
+    static let version = 2                       // bump to show setup again after a big change (2: lock-in apps)
     private static let key = "setupVersionDone"
     private var window: KeyPanel?
 
@@ -18,7 +18,7 @@ final class SetupWindow {
     func open(step: SetupStep = .welcome) {
         Engine.shared.card = nil
         window?.close()
-        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
+        let w = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 660, height: 620),
                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
@@ -32,7 +32,7 @@ final class SetupWindow {
     func close() { window?.close(); window = nil }
 }
 
-enum SetupStep: Int, CaseIterable { case welcome, distractions, strictness, access, goal, done }
+enum SetupStep: Int, CaseIterable { case welcome, apps, distractions, strictness, access, goal, done }
 
 // MARK: - Permissions
 
@@ -212,6 +212,7 @@ struct SetupView: View {
             Group {
                 switch step {
                 case .welcome: welcome
+                case .apps: appsStep
                 case .distractions: distractions
                 case .strictness: strictness
                 case .access: accessStep
@@ -223,14 +224,31 @@ struct SetupView: View {
             .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .opacity))
             footer
         }
-        .frame(width: 640, height: 600)
+        .frame(width: 660, height: 620)
         .background(VisualEffect(material: .underWindowBackground))
+        .tint(Theme.accent)
         .onChange(of: step) { _, s in
             m.save(includeKey: false)
             if s == .access { access.startWatching() } else { access.stopWatching() }
         }
-        .onAppear { if step == .access { access.startWatching() } }
+        .onAppear {
+            if step == .access { access.startWatching() }
+            if m.lockinApps.isEmpty { m.lockinApps = SetupView.suggestedApps(rules: m.blocks) }
+        }
         .onDisappear { access.stopWatching(); m.save(includeKey: false) }
+    }
+
+    /// A starting pick: apps your task rules share, else your first installed browser, editor and terminal.
+    static func suggestedApps(rules: [Preset]) -> [String] {
+        let installed = Set(InstalledApps.all.map(\.name))
+        var counts: [String: Int] = [:]
+        for r in rules { for a in Set(r.apps ?? []) where installed.contains(a) { counts[a, default: 0] += 1 } }
+        let shared = counts.filter { $0.value >= 2 }.keys.sorted()
+        if !shared.isEmpty { return Array(shared.prefix(8)) }
+        let groups = [["Dia", "Google Chrome", "Arc", "Safari", "Firefox", "Brave Browser"],
+                      ["Visual Studio Code", "Cursor", "Xcode", "Zed", "IntelliJ IDEA", "PyCharm"],
+                      ["iTerm2", "Warp", "Ghostty", "Terminal"]]
+        return groups.compactMap { g in g.first(where: installed.contains) }
     }
 
     // MARK: pieces
@@ -239,7 +257,7 @@ struct SetupView: View {
         let steps = SetupStep.allCases.filter { $0 != .welcome && $0 != .done }
         return HStack(spacing: 6) {
             ForEach(steps, id: \.rawValue) { s in
-                Capsule().fill(s.rawValue <= step.rawValue ? Color.accentColor : Color.primary.opacity(0.12))
+                Capsule().fill(s.rawValue <= step.rawValue ? Theme.accent : Color.primary.opacity(0.12))
                     .frame(width: s == step ? 26 : 14, height: 5)
             }
         }
@@ -250,9 +268,9 @@ struct SetupView: View {
         VStack(spacing: 8) {
             Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.4).multilineTextAlignment(.center)
             Text(sub).font(.system(size: 13.5)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: 440)
+                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: 460)
         }
-        .padding(.top, 26).padding(.bottom, 20)
+        .padding(.top, 24).padding(.bottom, 18)
     }
 
     private var footer: some View {
@@ -262,23 +280,18 @@ struct SetupView: View {
             }
             Spacer()
             switch step {
-            case .welcome: bigButton("Let's go") { go(1) }
+            case .welcome: Button("Let's go") { go(1) }.buttonStyle(PrimaryButtonStyle(large: true)).keyboardShortcut(.defaultAction)
+            case .apps:
+                Button("Continue") { go(1) }.buttonStyle(PrimaryButtonStyle(large: true)).keyboardShortcut(.defaultAction)
+                    .disabled(m.lockinApps.isEmpty)
             case .access:
                 if !access.allGood { Button("Skip for now") { go(1) }.buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 13)).padding(.trailing, 10) }
-                bigButton("Continue") { go(1) }
+                Button("Continue") { go(1) }.buttonStyle(PrimaryButtonStyle(large: true)).keyboardShortcut(.defaultAction)
             case .done: EmptyView()
-            default: bigButton("Continue") { go(1) }
+            default: Button("Continue") { go(1) }.buttonStyle(PrimaryButtonStyle(large: true)).keyboardShortcut(.defaultAction)
             }
         }
         .padding(.horizontal, 32).padding(.bottom, 26).padding(.top, 8)
-    }
-
-    private func bigButton(_ t: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(t).font(.system(size: 14, weight: .semibold)).padding(.horizontal, 22).padding(.vertical, 9)
-                .foregroundStyle(.white).background(Capsule().fill(Color.accentColor))
-        }
-        .buttonStyle(.plain).keyboardShortcut(.defaultAction)
     }
 
     private func go(_ d: Int) {
@@ -291,13 +304,14 @@ struct SetupView: View {
     private var welcome: some View {
         VStack(spacing: 18) {
             Spacer()
-            Image(systemName: "scope").font(.system(size: 54, weight: .light)).foregroundStyle(Color.accentColor)
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 84, height: 84)
             Text("Set up lockin once").font(.system(size: 30, weight: .bold)).tracking(-0.5)
-            Text("About 2 minutes. After this you won't have to think about it again.")
+            Text("About two minutes. Then your day starts with a plan, and the plan holds.")
                 .font(.system(size: 14)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 12) {
+                bullet("square.grid.2x2.fill", "Pick the few apps you work in")
                 bullet("hand.raised.fill", "Pick what pulls you off task")
-                bullet("shield.lefthalf.filled", "Choose how strict lockin is")
+                bullet("lock.fill", "Choose how hard lockin holds the line")
                 bullet("checkmark.shield.fill", "Allow access in one place")
                 bullet("flame.fill", "Set a daily goal for your streak")
             }
@@ -307,112 +321,40 @@ struct SetupView: View {
     }
     private func bullet(_ icon: String, _ t: String) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).foregroundStyle(Color.accentColor).frame(width: 22)
+            Image(systemName: icon).foregroundStyle(Theme.accent).frame(width: 22)
             Text(t).font(.system(size: 14))
+        }
+    }
+
+    private var appsStep: some View {
+        VStack(spacing: 0) {
+            header("Which apps do you work in?", "Sessions allow only these. Everything else gets covered, so pick just the few you need. Each task can change them later.")
+            ScrollView {
+                AppGrid(selected: $m.lockinApps, columns: 4, limit: 12).padding(.horizontal, 44).padding(.bottom, 10)
+            }
         }
     }
 
     private var distractions: some View {
         VStack(spacing: 0) {
-            header("What pulls you off task?", "These get covered during a focus block. Tap to turn one on or off.")
-            ScrollView {
-                VStack(spacing: 18) {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-                        ForEach(DistractionPick.catalog) { p in tile(p) }
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Anything else? Add a site or app").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
-                        TokenList(items: extrasBinding, placeholder: "e.g. pokernow.club or Slack")
-                    }
-                }
-                .padding(.horizontal, 40).padding(.bottom, 10)
-            }
+            header("What pulls you off task?", "These stay covered during sessions, and until today counts if you earn your free time.")
+            ScrollView { DistractionGrid(m: m).padding(.horizontal, 40).padding(.bottom, 10) }
         }
-    }
-
-    private func isOn(_ p: DistractionPick) -> Bool {
-        p.sites.contains(where: m.distractingSites.contains) || p.apps.contains(where: m.distractingApps.contains)
-    }
-    private func toggle(_ p: DistractionPick) {
-        if isOn(p) {
-            m.distractingSites.removeAll(where: p.sites.contains); m.distractingApps.removeAll(where: p.apps.contains)
-        } else {
-            m.distractingSites += p.sites.filter { !m.distractingSites.contains($0) }
-            m.distractingApps += p.apps.filter { !m.distractingApps.contains($0) }
-        }
-    }
-    /// Sites and apps on your lists that aren't one of the tiles. Anything with a dot is a site.
-    private var extrasBinding: Binding<[String]> {
-        Binding(get: {
-            m.distractingSites.filter { !DistractionPick.allSites.contains($0) } + m.distractingApps.filter { !DistractionPick.allApps.contains($0) }
-        }, set: { new in
-            let old = Set(m.distractingSites.filter { !DistractionPick.allSites.contains($0) } + m.distractingApps.filter { !DistractionPick.allApps.contains($0) })
-            for x in old where !new.contains(x) { m.distractingSites.removeAll { $0 == x }; m.distractingApps.removeAll { $0 == x } }
-            for x in new where !old.contains(x) {
-                if x.contains(".") { m.distractingSites.append(x.lowercased()) } else { m.distractingApps.append(x) }
-            }
-        })
-    }
-
-    private func tile(_ p: DistractionPick) -> some View {
-        let on = isOn(p)
-        return Button { withAnimation(.easeOut(duration: 0.12)) { toggle(p) } } label: {
-            HStack(spacing: 9) {
-                Image(systemName: p.icon).font(.system(size: 14)).frame(width: 20)
-                    .foregroundStyle(on ? Color.white : .secondary)
-                Text(p.name).font(.system(size: 13, weight: .medium)).foregroundStyle(on ? Color.white : .primary).lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: on ? "checkmark.circle.fill" : "circle").font(.system(size: 13))
-                    .foregroundStyle(on ? Color.white : Color.secondary.opacity(0.5))
-            }
-            .padding(.horizontal, 12).frame(height: 42)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(on ? Color.accentColor : Color.primary.opacity(0.06)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private var strictness: some View {
         VStack(spacing: 0) {
-            header("How strict should lockin be?", "What happens when you open one of those during a focus block. Breaks are never covered.")
-            VStack(spacing: 10) {
-                choice("nudge", "bell.fill", "Nudge me", "A reminder drops out of the notch. Nothing gets in your way.")
-                choice("cover", "rectangle.inset.filled", "Cover it", "A blurred cover with Back to work. \"Give me 5 min\" unlocks after \(Int(Engine.snoozeWait)) seconds, \(Engine.snoozesPerBlock) times per block.", recommended: true)
-                choice("hard", "lock.fill", "Cover, no passes", "Same cover, no way around it until the block ends.")
+            header("How hard should lockin hold the line?", "What happens when you open something outside the session. Breaks are never covered.")
+            VStack(spacing: 16) {
+                StrictnessChoice(m: m)
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Earn your free time: keep distractions covered until today counts", isOn: $m.earnFreeTime)
+                        .toggleStyle(.switch).controlSize(.small).font(.system(size: 12.5))
+                    Text("Outside sessions too, until you've hit your daily goal.").font(.system(size: 11.5)).foregroundStyle(.secondary).padding(.leading, 2)
+                }
             }
             .padding(.horizontal, 56)
-            Toggle("Play a soft sound for starts, check-ins and finishing", isOn: $m.sounds)
-                .toggleStyle(.switch).controlSize(.small).font(.system(size: 12.5)).padding(.top, 22)
         }
-    }
-
-    private func choice(_ id: String, _ icon: String, _ title: String, _ sub: String, recommended: Bool = false) -> some View {
-        let on = m.blocking == id
-        return Button { withAnimation(.easeOut(duration: 0.12)) { m.blocking = id } } label: {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: icon).font(.system(size: 17)).frame(width: 34, height: 34)
-                    .foregroundStyle(on ? Color.white : Color.accentColor)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(on ? Color.accentColor : Color.accentColor.opacity(0.12)))
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(title).font(.system(size: 14, weight: .semibold))
-                        if recommended {
-                            Text("Recommended").font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.accentColor)
-                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.accentColor.opacity(0.12)))
-                        }
-                    }
-                    Text(sub).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: on ? "largecircle.fill.circle" : "circle").font(.system(size: 16))
-                    .foregroundStyle(on ? Color.accentColor : Color.secondary.opacity(0.5))
-            }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(on ? 0.08 : 0.04)))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Color.accentColor : .clear, lineWidth: 1.5))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private var accessStep: some View {
@@ -427,19 +369,19 @@ struct SetupView: View {
                             }
                         }
                     }
-                    group("Plan around your calendar", "Read-only. Your events stay on your Mac.") {
+                    group("Your calendar", "Read-only. Events show on your plan, and lockin asks before locking in for one.") {
                         permRow(icon: appIcon("Calendar"), name: "Calendar", state: access.calendar, busy: false) {
                             Task { await access.allowCalendar() }
                         }
                     }
                     if !access.terminals.isEmpty {
-                        group("Optional: Claude Code in the terminal", "Lets a Claude Code session in a project folder count as on task.") {
+                        group("Optional: Claude Code in the terminal", "Lets a task rule allow Claude Code sessions in some folders and not others.") {
                             ForEach(access.terminals, id: \.self) { a in
                                 permRow(icon: appIcon(a), name: a, state: access.apps[a] ?? .notAsked, busy: access.asking == a) { access.allow(a) }
                             }
                         }
                     }
-                    group("Start with your Mac", "So the timer and covers are there without remembering to open lockin.") {
+                    group("Start with your Mac", "So your morning screen and the covers are there without remembering to open lockin.") {
                         HStack(spacing: 10) {
                             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 24, height: 24)
                             Text("Open lockin at login").font(.system(size: 13))
@@ -452,7 +394,7 @@ struct SetupView: View {
                         Button { access.allowAll() } label: {
                             Label("Allow all", systemImage: "checkmark.shield").font(.system(size: 12.5, weight: .medium))
                         }
-                        .buttonStyle(.bordered).padding(.top, 4)
+                        .buttonStyle(SecondaryButtonStyle()).padding(.top, 4)
                     }
                 }
                 .padding(.horizontal, 48).padding(.bottom, 10)
@@ -479,11 +421,11 @@ struct SetupView: View {
             if busy {
                 ProgressView().controlSize(.small)
             } else if state == .granted {
-                Label("Allowed", systemImage: "checkmark.circle.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(.green)
+                Label("Allowed", systemImage: "checkmark.circle.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.accent)
             } else if state == .denied {
                 Button("Turn on in Settings", action: action).controlSize(.small)
             } else {
-                Button("Allow", action: action).controlSize(.small).buttonStyle(.borderedProminent)
+                Button("Allow", action: action).buttonStyle(PrimaryButtonStyle())
             }
         }
         .padding(.vertical, 5)
@@ -509,8 +451,12 @@ struct SetupView: View {
                     Text("Days a week").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                     HStack(spacing: 8) { ForEach(3...7, id: \.self) { v in pill("\(v)", m.weekGoal == v) { m.weekGoal = v } } }
                 }
-                Toggle("Remind me at \(m.streakReminderAt.formatted(date: .omitted, time: .shortened)) if today hasn't counted yet", isOn: $m.streakReminderOn)
-                    .toggleStyle(.switch).controlSize(.small).font(.system(size: 12.5))
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Show my day full screen the first time I use my Mac each day", isOn: $m.morningGate)
+                    Toggle("Start planned sessions at their time", isOn: $m.autoStart)
+                    Toggle("Remind me at \(m.streakReminderAt.formatted(date: .omitted, time: .shortened)) if today hasn't counted yet", isOn: $m.streakReminderOn)
+                }
+                .toggleStyle(.switch).controlSize(.small).font(.system(size: 12.5))
             }
         }
     }
@@ -518,8 +464,8 @@ struct SetupView: View {
     private func pill(_ t: String, _ on: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(t).font(.system(size: 13.5, weight: .semibold)).frame(minWidth: 52).padding(.horizontal, 12).padding(.vertical, 9)
-                .foregroundStyle(on ? Color.white : .primary)
-                .background(Capsule().fill(on ? Color.accentColor : Color.primary.opacity(0.07)))
+                .foregroundStyle(on ? Color.black.opacity(0.85) : .primary)
+                .background(Capsule().fill(on ? Theme.accent : Color.primary.opacity(0.07)))
         }
         .buttonStyle(.plain)
     }
@@ -527,20 +473,22 @@ struct SetupView: View {
     private var done: some View {
         VStack(spacing: 16) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(.green)
+            Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(Theme.accent)
             Text("You're set").font(.system(size: 30, weight: .bold)).tracking(-0.5)
             VStack(alignment: .leading, spacing: 8) {
-                summary("hand.raised.fill", "\(m.distractingSites.count + m.distractingApps.count) distractions, \(m.blocking == "nudge" ? "nudged" : m.blocking == "hard" ? "covered with no passes" : "covered")")
-                summary("checkmark.shield.fill", access.allGood ? "All access allowed" : "Some access skipped. lockin still works, just sees less")
+                summary("square.grid.2x2.fill", "\(m.lockinApps.count) lock-in apps: \(m.lockinApps.prefix(3).joined(separator: ", "))\(m.lockinApps.count > 3 ? "…" : "")")
+                summary("lock.fill", m.blocking == "hard" ? "Locked: no passes" : "Strict: \(Engine.snoozesPerBlock) passes per session")
+                summary("hand.raised.fill", "\(m.distractingSites.count + m.distractingApps.count) distractions" + (m.earnFreeTime ? ", covered until today counts" : ""))
                 summary("flame.fill", "Goal: \(fmtMinutes(m.statsGoal)) a day, \(m.weekGoal) days a week")
             }
             .padding(.vertical, 6)
-            Text("Change any of this later in the lockin window under Setup.").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Change any of this later in the lockin window, under Setup.").font(.system(size: 12)).foregroundStyle(.secondary)
             VStack(spacing: 10) {
-                bigButton("Start a \(fmtMinutes(m.statsGoal)) block") {
+                Button("Plan today") {
                     finish()
-                    if let p = e.cfg.blocks.first { e.startBlock(p, minutes: m.statsGoal, task: nil) }
+                    if AppState.load().plan_shown != today(), m.morningGate { Gate.shared.show() } else { Planner.shared.open() }
                 }
+                .buttonStyle(PrimaryButtonStyle(large: true))
                 Button("Not now") { finish() }.buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 13))
             }
             .padding(.top, 8)
@@ -550,7 +498,7 @@ struct SetupView: View {
     }
     private func summary(_ icon: String, _ t: String) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(Color.accentColor).frame(width: 20)
+            Image(systemName: icon).foregroundStyle(Theme.accent).frame(width: 20)
             Text(t).font(.system(size: 13.5))
         }
     }

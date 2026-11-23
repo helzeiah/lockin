@@ -10,31 +10,37 @@ struct FocusApp: App {
         MenuBarExtra {
             MenuContent().environmentObject(e)
         } label: {
-            Image(systemName: e.block == nil ? "scope" : (e.drifting ? "exclamationmark.circle" : "timer"))
+            Image(systemName: e.block == nil ? "scope" : (e.drifting ? "exclamationmark.circle" : (e.isBreak ? "cup.and.saucer" : "lock.fill")))
         }
         .menuBarExtraStyle(.window)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    // lockin://start?block=Study&minutes=25&task=...  lockin://stop  lockin://plan  lockin://today  lockin://recap  lockin://stats  lockin://setup
+    // lockin://start?task=Essay&minutes=25 (or block=<task rule>)  lockin://next  lockin://stop  lockin://plan
+    // lockin://tomorrow  lockin://today  lockin://recap  lockin://stats  lockin://setup  lockin://gate
     func application(_ app: NSApplication, open urls: [URL]) {
         Task { @MainActor in
             let e = Engine.shared
             for u in urls {
-                let q = Dictionary(uniqueKeysWithValues: (URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+                let q = Dictionary((URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") },
+                                   uniquingKeysWith: { a, _ in a })
+                let minutes = Int(q["minutes"] ?? "").map { min(max($0, 1), 480) }
+                let task = q["task"].map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)) }.flatMap { $0.isEmpty ? nil : $0 }
                 switch u.host ?? "" {
                 case "start":
-                    if let p = e.presetFor(q["block"] ?? "") ?? e.cfg.blocks.first {
-                        e.startBlock(p, minutes: Int(q["minutes"] ?? ""), task: q["task"].flatMap { $0.isEmpty ? nil : $0 })
-                    }
+                    if let p = e.presetFor(q["block"] ?? "") { e.startBlock(p, minutes: minutes, task: task) }
+                    else if let task { e.startSession(task: task, minutes: minutes ?? 45) }
+                    else { e.startQuick(minutes: minutes ?? 25) }
                 case "next": if let t = e.nextTodo { e.startTodo(t) }
                 case "stop": e.stopBlock(completed: false)
-                case "plan": Planner.shared.open()
+                case "plan": Planner.shared.open(tab: .plan, day: .today)
+                case "tomorrow": Planner.shared.open(tab: .plan, day: .tomorrow)
                 case "today": e.showPlan()
                 case "recap": e.showRecap()
                 case "stats": e.showStats()
                 case "setup": SetupWindow.shared.open()
+                case "gate": Gate.shared.show()
                 default: break
                 }
             }
@@ -51,16 +57,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    // Quitting mid-session is on the record; the session picks back up on the next launch.
+    func applicationWillTerminate(_ n: Notification) {
+        MainActor.assumeIsolated { Engine.shared.noteQuit() }
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("lockin runs in the menu bar")
         ProcessInfo.processInfo.disableSuddenTermination()
         // SwiftUI installs a full File/Edit/View/Window/Help menu; set ours after it's done.
         DispatchQueue.main.async { NSApp.mainMenu = minimalMainMenu() }
+        DispatchQueue.global(qos: .utility).async { _ = InstalledApps.all }   // warm the app list for the pickers
         Task { @MainActor in
             Engine.shared.start()
             IslandController.shared.start()
             BlockerController.shared.start()
-            // First launch: the one-time setup (distractions, strictness, permissions, goal).
+            // First launch (or after a big update): the one-time setup.
             if SetupWindow.needed { try? await Task.sleep(nanoseconds: 800_000_000); SetupWindow.shared.open() }
         }
     }
