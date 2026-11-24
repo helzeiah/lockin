@@ -186,3 +186,55 @@ struct StreakStrip: View {
         .onAppear { st = e.stats() }
     }
 }
+
+/// The menu-bar icon: the app icon's ring. Free, it's the plain mark (a template, so it follows the menu bar). In a
+/// session the ring fills with your progress in the island's colors: your skin while locked in, red when you drift
+/// (with a !), orange on a break (with pause bars). Drawn in one color so it reads on light and dark menu bars.
+enum MenuIcon {
+    enum Mode: Hashable { case free, locked, drifting, onBreak }
+    private static var cache: [String: NSImage] = [:]
+
+    @MainActor static func image(for e: Engine) -> NSImage {
+        let mode: Mode = e.block == nil ? .free : e.drifting ? .drifting : e.isBreak ? .onBreak : .locked
+        let tint = mode == .drifting ? "red" : mode == .onBreak ? "orange" : "green"
+        return image(mode, progress: e.progress, color: NSColor(tintColor(tint)), key: Skin.current.id)
+    }
+
+    static func image(_ mode: Mode, progress: Double, color: NSColor, key: String = "") -> NSImage {
+        let steps = 48, step = mode == .free ? 0 : Int((min(1, max(0, progress)) * Double(steps)).rounded())
+        let id = "\(mode)-\(step)-\(key)"
+        if let img = cache[id] { return img }
+        let side: CGFloat = 17
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            NSGraphicsContext.current?.cgContext.scaleBy(x: side / 16, y: side / 16)   // drawn on a 16×16 grid
+            let ink = mode == .free ? NSColor.black : color
+            let c = NSPoint(x: 8, y: 8), r: CGFloat = 6.1, w: CGFloat = 1.55
+            func arc(_ fraction: Double, _ color: NSColor) {
+                guard fraction > 0.001 else { return }
+                let p = NSBezierPath()
+                p.appendArc(withCenter: c, radius: r, startAngle: 90, endAngle: 90 - 360 * CGFloat(min(fraction, 0.9999)), clockwise: true)
+                p.lineWidth = w; p.lineCapStyle = .round
+                color.setStroke(); p.stroke()
+            }
+            func pill(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat) {
+                ink.setFill(); NSBezierPath(roundedRect: NSRect(x: x, y: y, width: width, height: height), xRadius: width / 2, yRadius: width / 2).fill()
+            }
+            if mode == .free {
+                arc(0.83, ink)                     // the app icon: an open ring and a dot
+            } else {
+                arc(1, ink.withAlphaComponent(0.3))   // track
+                arc(Double(step) / Double(steps), ink)
+            }
+            switch mode {
+            case .free, .locked: ink.setFill(); NSBezierPath(ovalIn: NSRect(x: 8 - 1.45, y: 8 - 1.45, width: 2.9, height: 2.9)).fill()
+            case .drifting: pill(7.25, 7.0, 1.5, 4.4); ink.setFill(); NSBezierPath(ovalIn: NSRect(x: 7.15, y: 4.15, width: 1.7, height: 1.7)).fill()
+            case .onBreak: pill(5.9, 5.6, 1.45, 4.8); pill(8.65, 5.6, 1.45, 4.8)
+            }
+            return true
+        }
+        img.isTemplate = mode == .free
+        img.accessibilityDescription = "lockin"
+        cache[id] = img
+        return img
+    }
+}

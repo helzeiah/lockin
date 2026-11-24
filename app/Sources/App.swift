@@ -10,7 +10,7 @@ struct FocusApp: App {
         MenuBarExtra {
             MenuContent().environmentObject(e)
         } label: {
-            Image(systemName: e.block == nil ? "scope" : (e.drifting ? "exclamationmark.circle" : (e.isBreak ? "cup.and.saucer" : "lock.fill")))
+            Image(nsImage: MenuIcon.image(for: e))
         }
         .menuBarExtraStyle(.window)
     }
