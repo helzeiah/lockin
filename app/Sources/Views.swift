@@ -3,6 +3,15 @@ import SwiftUI
 // The look: dark-first, one accent (the app icon's green), rounded numerals, quiet secondary text.
 enum Theme {
     static var accent: Color { Skin.current.color }                  // the icon's green unless you've unlocked a skin
+    /// The skin as a fill: its gradient for pattern skins, else the plain color.
+    static var accentFill: AnyShapeStyle {
+        let s = Skin.current
+        return s.colors.count > 1 ? AnyShapeStyle(LinearGradient(colors: s.colors, startPoint: .leading, endPoint: .trailing)) : AnyShapeStyle(s.color)
+    }
+    static var accentRing: AnyShapeStyle {
+        let s = Skin.current
+        return s.colors.count > 1 ? AnyShapeStyle(AngularGradient(colors: s.colors + [s.colors[0]], center: .center)) : AnyShapeStyle(s.color)
+    }
     static let flame = Color(red: 1.0, green: 0.62, blue: 0.04)
     static let danger = Color(red: 1.0, green: 0.33, blue: 0.30)
     static let info = Color(red: 0.36, green: 0.66, blue: 1.0)
@@ -31,7 +40,7 @@ struct Ring: View {
         ZStack {
             Circle().stroke(track, lineWidth: width)
             Circle().trim(from: 0, to: max(0.001, min(1, progress)))
-                .stroke(color, style: StrokeStyle(lineWidth: width, lineCap: .round))
+                .stroke(color == Theme.accent ? Theme.accentRing : AnyShapeStyle(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(.linear(duration: 1), value: progress)
         }
@@ -62,30 +71,13 @@ struct StreakBadge: View {
     var streak: Int
     var body: some View {
         HStack(spacing: 5) {
-            GlowFlame(streak: streak, size: 15)
+            StreakFire(streak: streak, size: 22)
             VStack(alignment: .leading, spacing: -1) {
                 Text("\(streak)").font(Theme.number(17)).monospacedDigit()
                 Text(streak == 1 ? "day" : "days").font(.system(size: 9.5, weight: .medium)).foregroundStyle(.secondary)
             }
         }
         .help(streak > 0 ? "\(streak)-day streak" : "No streak yet: hit today's goal to start one")
-    }
-}
-
-/// The streak flame: glows from a week on, and pulses from a month on.
-struct GlowFlame: View {
-    var streak: Int
-    var size: CGFloat = 15
-    @State private var pulse = false
-    var body: some View {
-        Image(systemName: "flame.fill").font(.system(size: size, weight: .semibold))
-            .foregroundStyle(streak > 0 ? Theme.flame : Color.secondary.opacity(0.6))
-            .shadow(color: streak >= 7 ? Theme.flame.opacity(pulse ? 0.95 : 0.6) : .clear, radius: streak >= 7 ? (pulse ? 9 : 5) : 0)
-            .scaleEffect(streak >= 30 && pulse ? 1.08 : 1)
-            .onAppear {
-                guard streak >= 30 else { pulse = streak >= 7; return }
-                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { pulse = true }
-            }
     }
 }
 
@@ -98,7 +90,7 @@ struct PrimaryButtonStyle: ButtonStyle {
             .font(.system(size: large ? 14.5 : 12.5, weight: .semibold))
             .padding(.horizontal, large ? 22 : 13).padding(.vertical, large ? 10 : 6)
             .foregroundStyle(Color.black.opacity(enabled ? 0.88 : 0.5))
-            .background(Capsule().fill(Theme.accent.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.35)))
+            .background(Capsule().fill(Theme.accentFill).opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.35))
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }

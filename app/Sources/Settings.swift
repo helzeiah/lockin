@@ -94,7 +94,7 @@ final class SettingsModel: ObservableObject {
     }
 
     static let providers: [(id: String, name: String)] = [
-        ("", "None: plan by hand"), ("claude-code", "Claude Code (your Claude subscription)"),
+        ("", "None: plan by hand"), ("apple", "Apple Intelligence (on this Mac, free)"), ("claude-code", "Claude Code (your Claude subscription)"),
         ("anthropic", "Claude API key"), ("openai", "OpenAI API key"),
         ("openai-compatible", "Other (OpenRouter, Gemini, Ollama, LM Studio…)")]
     static let defaultModels = ["claude-code": "sonnet", "anthropic": "claude-opus-5-5", "openai": "gpt-5-mini",
@@ -104,6 +104,16 @@ final class SettingsModel: ObservableObject {
     func testAI() {
         save()
         testing = true; testResult = nil
+        if aiProvider == "apple" {
+            Task { @MainActor in
+                do {
+                    _ = try await AppleAI.plan(prompt: "Plan one item: test 10 minutes at 09:00. Reply \"ok\".")
+                    self.testResult = (true, "Apple Intelligence is working.")
+                } catch { self.testResult = (false, error.localizedDescription) }
+                self.testing = false
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let out = runCoach(["test"])
             let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
@@ -535,10 +545,27 @@ struct AITab: View {
                 }
             } footer: {
                 Text(m.aiProvider.isEmpty
-                     ? "Everything works without AI: type \"leetcode 45, essay 30 at 2pm\" and lockin times it for you."
+                     ? "Everything works without AI: type \"leetcode 45, essay 30 at 2pm\" and lockin times it, or edit with \"done leetcode\", \"essay at 3pm\", \"free at 8\"."
+                     : m.aiProvider == "apple"
+                     ? "Apple's on-device model plans your day. Free, private, works offline. It sees your plan, today's calendar and what you type, and none of it leaves your Mac."
                      : "The AI turns a brain dump into a timed plan and edits it when you say things like \"free at 8 now\". It sees your plan, today's calendar and what you type. Nothing else.")
             }
-            if !m.aiProvider.isEmpty {
+            if m.aiProvider == "apple" {
+                let st = AppleAI.status
+                Section {
+                    Label(st.text, systemImage: st.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(st.ok ? Theme.accent : Theme.flame)
+                    if !st.ok { Button("Open Apple Intelligence settings") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Siri-Settings.extension")!) } }
+                    HStack {
+                        Button(m.testing ? "Testing…" : "Test it") { m.testAI() }.disabled(m.testing || !st.ok)
+                        if let r = m.testResult {
+                            Label(r.text, systemImage: r.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(r.ok ? Theme.accent : Theme.flame).font(.system(size: 12)).lineLimit(2)
+                        }
+                    }
+                } header: { Text("Apple Intelligence") }
+            }
+            if !m.aiProvider.isEmpty && m.aiProvider != "apple" {
                 Section("Model") {
                     TextField("Model", text: $m.aiModel, prompt: Text(SettingsModel.defaultModels[m.aiProvider] ?? ""))
                     if m.aiProvider == "openai-compatible" || m.aiProvider == "openai" {

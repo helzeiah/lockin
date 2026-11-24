@@ -36,6 +36,7 @@ struct Stats {
                 let d = Stats.day(of: ts)
                 switch obj["type"] as? String {
                 case "block_end":
+                    if obj["sig"] != nil && !Integrity.valid(obj) { continue }   // edited by hand: doesn't count
                     let m = (obj["focused_min"] as? Int) ?? 0
                     s.add(m, at: ts)
                     if m > 0 { blocks[(obj["name"] as? String) ?? "Other", default: 0] += m }
@@ -49,7 +50,7 @@ struct Stats {
         }
         // the block running right now counts toward today as it goes
         if let b = live, b.kind == "focus" {
-            let m = max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
+            let m = b.tracked ? b.countedMinutes : max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
             if m > 0 { s.add(m, at: now); blocks[b.name, default: 0] += m }
         }
         s.byBlock = blocks.map { ($0.key, $0.value) }.sorted { $0.minutes > $1.minutes }
@@ -301,7 +302,7 @@ struct StatsPage: View {
             StatsView()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(VisualEffect(material: .underWindowBackground))
+        .background(AppBackground())
     }
 }
 
@@ -356,7 +357,7 @@ struct StatsView: View {
     private var tiles: some View {
         HStack(spacing: 10) {
             tile(fmtMinutes(stats.todayMinutes), "today · goal \(stats.goal) min", accent: stats.todayMinutes >= stats.goal)
-            tile("\(stats.streak)", "day streak · best \(stats.best)", icon: stats.streak > 0 ? "flame.fill" : nil, accent: stats.streak > 0)
+            tile("\(stats.streak)", "day streak · best \(stats.best)", icon: "flame", accent: stats.streak >= 3)
             tile("\(stats.weekDaysCounted)/\(stats.weekGoal)", "days this week · \(fmtMinutes(stats.weekMinutes))", accent: stats.weekDaysCounted >= stats.weekGoal)
             tile(stats.keptRate.map { "\($0)%" } ?? "–", "sessions kept, all time", accent: (stats.keptRate ?? 0) >= 80)
         }
@@ -388,7 +389,7 @@ struct StatsView: View {
     private func tile(_ value: String, _ label: String, icon: String? = nil, accent: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                if let icon { Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Theme.flame) }
+                if icon != nil { StreakFire(streak: stats.streak, size: 20) }
                 Text(value).font(Theme.number(22)).monospacedDigit()
                     .foregroundStyle(accent ? Theme.accent : .primary)
             }

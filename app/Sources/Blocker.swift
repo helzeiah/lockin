@@ -142,7 +142,10 @@ struct BlockerCard: View {
             }
             .padding(30)
             .frame(width: 390)
-            .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.regularMaterial))
+            .background(ZStack {
+                RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.regularMaterial)
+                SkinWash(strength: 1.3).clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            })
             .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.08)))
             .shadow(color: .black.opacity(0.25), radius: 30, y: 12)
             .tint(Theme.accent)

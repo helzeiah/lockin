@@ -84,6 +84,13 @@ enum Detect {
             .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
 
+    /// Seconds since the last key press, click or scroll. Mouse movement alone doesn't count, so a jiggler can't
+    /// fake work. (Counts only, never which keys: no permission needed.)
+    static func secondsSinceRealInput() -> Double {
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        return types.map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }.min() ?? .infinity
+    }
+
     static func idleSeconds() -> Double {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
     }

@@ -1,6 +1,7 @@
 """One prompt in, one JSON object out, from whichever AI is set up in Settings > AI planner.
 
 Providers ("none" = no AI; the app's manual planning needs none of this):
+    apple              Apple Intelligence: runs in the app itself (AppleAI.swift); this helper only builds the prompt
     claude-code        the `claude` CLI, signed in with a Claude subscription (no API key)
     anthropic          Claude API key
     openai             OpenAI API key
@@ -42,7 +43,9 @@ def settings(cfg):
 def ask_json(cfg, prompt, schema, system="Answer only in the requested JSON."):
     provider, model, base, key = settings(cfg)
     if provider == "none":
-        raise AIError("no AI is set up: add blocks by hand, or pick an AI in Settings > AI planner")
+        raise AIError("no AI is set up: plan by typing, or pick an AI in Settings > AI planner")
+    if provider == "apple":
+        raise AIError("Apple Intelligence runs inside the lockin app, not this helper")
     if provider == "claude-code":
         return _claude_code(prompt, schema, system, model)
     if provider == "anthropic":

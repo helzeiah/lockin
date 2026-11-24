@@ -34,7 +34,10 @@ compile() {  # output, swiftc args...
   rm -f "${parts[@]}"
 }
 echo "compiling lockin (${ARCHS[*]})..."
-compile "$APP/Contents/MacOS/lockin" -parse-as-library app/Sources/*.swift
+# Apple Intelligence (FoundationModels, macOS 26+) is linked weakly, so the app still opens on older macOS.
+WEAK=()
+[[ -d "$(xcrun --show-sdk-path)/System/Library/Frameworks/FoundationModels.framework" ]] && WEAK=(-Xlinker -weak_framework -Xlinker FoundationModels)
+compile "$APP/Contents/MacOS/lockin" -parse-as-library app/Sources/*.swift ${WEAK[@]+"${WEAK[@]}"}
 compile "$APP/Contents/Resources/calevents" app/Helper/calevents.swift
 cp app/Helper/coach.py app/Helper/ai.py config.example.json "$APP/Contents/Resources/"
 [[ -f app/AppIcon.icns ]] && cp app/AppIcon.icns "$APP/Contents/Resources/"

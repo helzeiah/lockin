@@ -225,7 +225,7 @@ struct SetupView: View {
             footer
         }
         .frame(width: 660, height: 620)
-        .background(VisualEffect(material: .underWindowBackground))
+        .background(AppBackground())
         .tint(Theme.accent)
         .onChange(of: step) { _, s in
             m.save(includeKey: false)

@@ -294,16 +294,27 @@ struct ActiveBlock: Codable {
     var apps: [String]? = nil   // the apps this session allows
     var snoozes: Int? = nil     // 5-minute passes used on covers this session
     var rule: String? = nil     // the task rule it matched, for its sites and Claude Code folders
+    // What the time was actually spent on (seconds), so only real work counts:
+    var activeSeconds: Double? = nil    // on task, with a key press, click or scroll in the last 90 seconds
+    var offlineSeconds: Double? = nil   // away from the Mac on a task that allows it (paper, iPad)
+    var idleSeconds: Double? = nil      // here, but nothing happening
+    /// Minutes that count: active, plus away time on offline-ok tasks.
+    var countedMinutes: Int { Int((((activeSeconds ?? 0) + (offlineSeconds ?? 0)) / 60).rounded()) }
+    var tracked: Bool { activeSeconds != nil || offlineSeconds != nil || idleSeconds != nil }
 }
 
 /// The plan day as "yyyy-MM-dd". A day runs 4am to 4am, the same as Stats, so a late night belongs to the day before.
 func today(_ now: Date = Date()) -> String { DateFormatter.ymd.string(from: Stats.day(of: now)) }
 func tomorrowDate(_ now: Date = Date()) -> Date { Calendar.current.date(byAdding: .day, value: 1, to: Stats.day(of: now)) ?? now }
 
+func logTimestamp(_ d: Date = Date()) -> String {
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"; f.locale = Locale(identifier: "en_US_POSIX")
+    return f.string(from: d)
+}
+
 func appendLog(_ ev: [String: Any]) {
     var e = ev
-    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-    e["ts"] = f.string(from: Date())
+    if e["ts"] == nil { e["ts"] = logTimestamp() }
     guard let d = try? JSONSerialization.data(withJSONObject: e), var line = String(data: d, encoding: .utf8) else { return }
     line += "\n"
     if let h = try? FileHandle(forWritingTo: Paths.log) {

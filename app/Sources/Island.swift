@@ -167,7 +167,15 @@ struct IslandView: View {
     private func shell<V: View>(_ v: V, radius: CGFloat, band: Bool = false) -> some View {
         v.padding(.top, band ? max(0, geo.barHeight - 4) : 0)
         .padding(.horizontal, IslandView.ear)
-        .background(NotchShape(radius: radius, ear: IslandView.ear).fill(Color.black))
+        .background(ZStack {
+            NotchShape(radius: radius, ear: IslandView.ear).fill(Color.black)
+            if band {   // opened up: stays black where it meets the notch, then fades into your skin
+                SkinWash(strength: 2)
+                    .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .clear, location: 0.28), .init(color: .white, location: 1)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .clipShape(NotchShape(radius: radius, ear: IslandView.ear))
+            }
+        })
         .overlay(NotchShape(radius: radius, ear: IslandView.ear).stroke(Color.white.opacity(0.08), lineWidth: 1).mask(
             LinearGradient(colors: [.clear, .clear, .white], startPoint: .top, endPoint: .bottom)))
         .clipShape(NotchShape(radius: radius, ear: IslandView.ear))
@@ -292,9 +300,13 @@ struct IslandView: View {
     private func expanded(_ c: Card) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: c.icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tintColor(c.tint))
-                    .frame(width: 34, height: 34)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tintColor(c.tint).opacity(c.tint == "white" ? 0.1 : 0.16)))
+                if c.icon.hasPrefix("emblem:"), let lvl = Int(c.icon.dropFirst(7)) {   // level-up cards show the new rank
+                    LevelEmblem(level: lvl, size: 40, pips: false).frame(width: 46, height: 42)
+                } else {
+                    Image(systemName: c.icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tintColor(c.tint))
+                        .frame(width: 34, height: 34)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tintColor(c.tint).opacity(c.tint == "white" ? 0.1 : 0.16)))
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(c.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
                     if !c.subtitle.isEmpty {

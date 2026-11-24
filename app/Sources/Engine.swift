@@ -5,7 +5,7 @@ import Foundation
 enum CardAction: Hashable {
     case dismiss, backToIt, snoozeDrift, startBreak, startNext, startTen, openPlanner, stop, confirmStop, addFive, startGoal, openStats
     case planTomorrow
-    case startTodo(String), snoozeTodo(String)
+    case startTodo(String), snoozeTodo(String), equipSkin(String)
     case lockInEvent(String), skipEvent(String), neverEvent(String)
 }
 
@@ -67,6 +67,9 @@ final class Engine: ObservableObject {
     private var lastDay = today()
     @Published var planning = false
     @Published var planError: String?
+    /// What the last typed edit did, shown under the plan box for a few seconds ("Done: LeetCode · Essay → 3:00 PM").
+    @Published var planNote: String?
+    private var planNoteTask: DispatchWorkItem?
     @Published var blocked: Blocked? = nil
     @Published var gateShown = false
     /// Focused minutes today (finished sessions), refreshed when a session ends and once a minute.
@@ -89,6 +92,9 @@ final class Engine: ObservableObject {
     private var askedEvents = Set<String>()
     private var promptedTodos = Set<String>()
     private var minuteCount = 0
+    private var lastEval: Date?
+    /// Real work needs a key press, click or scroll this recently (reading and thinking get some slack).
+    static let activeWindow: Double = 90
 
     /// The running session's rules: only its apps (plus always-fine ones), its task rule's sites and Claude folders.
     var preset: Preset? {
@@ -152,8 +158,13 @@ final class Engine: ObservableObject {
         guard a.kind == "focus", let q = s.quit_at else { return }
         let end = min(q, a.ends)
         let elapsed = max(0, Int((end - a.started) / 60))
-        appendLog(["type": "block_end", "name": a.name, "task": a.task ?? "", "completed": false, "how": "quit", "planned_min": a.minutes,
-                   "elapsed_min": elapsed, "focused_min": max(0, elapsed - Int(a.offSeconds / 60)), "apps": a.apps ?? []])
+        var entry: [String: Any] = ["type": "block_end", "ts": logTimestamp(), "name": a.name, "task": a.task ?? "", "completed": false, "how": "quit",
+                                    "planned_min": a.minutes, "elapsed_min": elapsed,
+                                    "focused_min": a.tracked ? min(elapsed, a.countedMinutes) : max(0, elapsed - Int(a.offSeconds / 60)),
+                                    "active_min": Int(((a.activeSeconds ?? 0) / 60).rounded()), "offline_min": Int(((a.offlineSeconds ?? 0) / 60).rounded()),
+                                    "idle_min": Int(((a.idleSeconds ?? 0) / 60).rounded()), "apps": a.apps ?? []]
+        entry["sig"] = Integrity.sign(entry)
+        appendLog(entry)
     }
 
     func start() {
@@ -202,8 +213,9 @@ final class Engine: ObservableObject {
 
     /// Adds what you typed ("leetcode 45, co-op 90 at 2pm") to today or tomorrow. Today, tasks without a time get the
     /// soonest open slot; each one's apps come from its words.
-    func addParsed(_ text: String, day: PlanDay) {
-        let parsed = PlanParser.parse(text)
+    func addParsed(_ text: String, day: PlanDay) { addTasks(PlanParser.parse(text), day: day) }
+
+    func addTasks(_ parsed: [ParsedTask], day: PlanDay) {
         guard !parsed.isEmpty else { return }
         let cfg = self.cfg
         planning = true
@@ -219,6 +231,80 @@ final class Engine: ObservableObject {
             }
             Task { @MainActor in self.planning = false }
         }
+    }
+
+    /// What you typed into the plan box, without any AI: new tasks get a time and their apps, and edits change the
+    /// session they mean ("done leetcode", "essay at 3pm", "push emails to tomorrow", "make essay 30 min", "free at 8").
+    func applyTyped(_ text: String, day: PlanDay) {
+        let commands = PlanParser.commands(text)
+        guard !commands.isEmpty else { return }
+        var notes: [String] = [], adds: [ParsedTask] = []
+        func missing(_ q: String) { notes.append("Nothing on the plan matches \"\(q)\"") }
+        for c in commands {
+            switch c {
+            case .add(let p):
+                if let start = p.start, p.minutes == nil, let t = match(p.task, in: list(day), open: true) {   // "essay at 3pm": move it
+                    let s = adjusted(start, day); updateTodo(t.id, start: s); notes.append("\(t.task) → \(clockLabel(s))")
+                } else { adds.append(p) }
+            case .done(let q):
+                if let t = match(q, in: list(day), open: true) { setDone(t.id, true); notes.append("Done: \(t.task)") } else { missing(q) }
+            case .remove(let q):
+                if let t = match(q, in: list(day), open: false) { deleteTodo(t.id); notes.append("Removed \(t.task)") } else { missing(q) }
+            case .move(let q, let start):
+                if let t = match(q, in: list(day), open: true) {
+                    let s = adjusted(start, day); updateTodo(t.id, start: s); notes.append("\(t.task) → \(clockLabel(s))")
+                } else { missing(q) }
+            case .tomorrow(let q):
+                if let t = match(q, in: todos, open: true) { move(t.id, to: .tomorrow); notes.append("\(t.task) → tomorrow") } else { missing(q) }
+            case .resize(let q, let minutes):
+                if let t = match(q, in: list(day), open: true) { updateTodo(t.id, minutes: minutes); notes.append("\(t.task): \(minutes) min") } else { missing(q) }
+            case .startFrom(let start):
+                let s = adjusted(start, day), n = reflow(from: s, day: day)
+                notes.append("Re-timed \(n) session\(n == 1 ? "" : "s") from \(clockLabel(s))")
+            }
+        }
+        if !adds.isEmpty { addTasks(adds, day: day); notes.append("Added \(adds.count) session\(adds.count == 1 ? "" : "s")") }
+        showPlanNote(notes.joined(separator: " · "))
+    }
+
+    func showPlanNote(_ text: String) {
+        planNoteTask?.cancel()
+        planNote = text
+        let w = DispatchWorkItem { [weak self] in Task { @MainActor in self?.planNote = nil } }
+        planNoteTask = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: w)
+    }
+
+    /// The session a typed edit means: most shared words (by letters), and a big bonus if the text is inside its name.
+    func match(_ query: String, in list: [Todo], open: Bool) -> Todo? {
+        let qw = TaskMatch.words(query), ql = query.lowercased()
+        var best: (todo: Todo, score: Int)?
+        for t in list where !open || !t.isDone {
+            var score = TaskMatch.words(t.task).intersection(qw).reduce(0) { $0 + $1.count }
+            if !ql.isEmpty, t.task.lowercased().contains(ql) { score += 10 }
+            if score >= 3, score > (best?.score ?? 0) { best = (t, score) }
+        }
+        return best?.todo
+    }
+
+    /// "free at 8" said at 6pm means 8pm: a morning time that's already past today becomes the evening one.
+    func adjusted(_ start: String, _ day: PlanDay) -> String {
+        guard day == .today, let d = parseHHMM(start), d < Date(), Calendar.current.component(.hour, from: d) < 12,
+              let pm = Calendar.current.date(byAdding: .hour, value: 12, to: d), pm > Date() else { return start }
+        return hhmm(pm)
+    }
+
+    /// Re-times everything not done yet, in order, starting at `start` with 5-minute breaks. Returns how many moved.
+    @discardableResult func reflow(from start: String, day: PlanDay) -> Int {
+        guard var t0 = parseHHMM(start, on: day == .today ? Date() : tomorrowDate()) else { return 0 }
+        var d = TodoDoc.load(), n = 0
+        d.edit(day) { list in
+            for i in list.indices where !list[i].isDone {
+                list[i].start = hhmm(t0); t0 = t0.addingTimeInterval(Double(list[i].left + 5) * 60); n += 1
+            }
+        }
+        d.save(); reloadTodos()
+        return n
     }
 
     func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil) {
@@ -331,6 +417,7 @@ final class Engine: ObservableObject {
         block = ActiveBlock(kind: "focus", name: ruleName ?? task ?? "Focus", task: task, todoId: todoId, started: t,
                             ends: t + Double(m * 60), minutes: m, offSeconds: 0, apps: apps, rule: ruleName)
         driftSince = nil; lastNudge = nil; snoozeUntil = .distantPast; snoozedSites = [:]; lastOnTask = nil; drifting = false; blocked = nil
+        block?.activeSeconds = 0; block?.offlineSeconds = 0; block?.idleSeconds = 0; lastEval = nil
         appendLog(["type": "block_start", "name": block!.name, "minutes": m, "task": task ?? "", "apps": apps])
         persist()
         if AppState.load().plan_shown != today() { passGate(how: "session") }   // starting work counts as starting the day
@@ -378,9 +465,15 @@ final class Engine: ObservableObject {
             return
         }
         let elapsed = Int((Date().timeIntervalSince1970 - b.started) / 60)
-        let focused = max(0, elapsed - Int(b.offSeconds / 60))
-        appendLog(["type": "block_end", "name": b.name, "task": b.task ?? "", "completed": completed, "how": completed ? "timer" : how,
-                   "planned_min": b.minutes, "elapsed_min": elapsed, "focused_min": focused, "apps": b.apps ?? []])
+        // Only real work counts: active minutes, plus away time on offline-ok tasks. (Old sessions: elapsed minus off-task.)
+        let focused = b.tracked ? min(elapsed, b.countedMinutes) : max(0, elapsed - Int(b.offSeconds / 60))
+        let idleMin = Int(((b.idleSeconds ?? 0) / 60).rounded())
+        var entry: [String: Any] = ["type": "block_end", "ts": logTimestamp(), "name": b.name, "task": b.task ?? "", "completed": completed,
+                                    "how": completed ? "timer" : how, "planned_min": b.minutes, "elapsed_min": elapsed, "focused_min": focused,
+                                    "active_min": Int(((b.activeSeconds ?? 0) / 60).rounded()), "offline_min": Int(((b.offlineSeconds ?? 0) / 60).rounded()),
+                                    "idle_min": idleMin, "apps": b.apps ?? []]
+        entry["sig"] = Integrity.sign(entry)
+        appendLog(entry)
         if let id = b.todoId {
             if completed { setDone(id, true) }
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
@@ -394,12 +487,14 @@ final class Engine: ObservableObject {
         guard !silent else { return }
         let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
         let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
+        Skin.noteLevel(rAfter.level)
         if rAfter.level > rBefore.level {
             play("Hero", volume: 0.55)
-            let skin = Skin.all.first { $0.level == rAfter.level }
-            show(Card(icon: "arrow.up.circle.fill", tint: "green", title: "Level \(rAfter.level) · \(rAfter.title)",
+            let skin = Skin.all.last { $0.level > rBefore.level && $0.level <= rAfter.level }
+            show(Card(icon: "emblem:\(rAfter.level)", tint: "green", title: "Level \(rAfter.level) · \(rAfter.title)",
                       subtitle: "+\(rAfter.xp - rBefore.xp) XP" + (skin.map { " · unlocked the \($0.name) skin" } ?? ""),
-                      buttons: [CardButton(label: "See rewards", action: .openStats)] + breakButtons))
+                      buttons: (skin.map { [CardButton(label: "Equip \($0.name)", action: .equipSkin($0.id))] } ?? [CardButton(label: "See rewards", action: .openStats)])
+                        + breakButtons))
             return
         }
         if let b = rAfter.badges.first(where: { nb in nb.earned != nil && rBefore.badges.contains { $0.id == nb.id && $0.earned == nil } }) {
@@ -421,10 +516,11 @@ final class Engine: ObservableObject {
                 return
             }
             play(hitGoal ? "Hero" : "Glass", volume: hitGoal ? 0.5 : 0.45)
+            let idleNote = idleMin >= 2 ? " · \(idleMin) idle min didn't count" : ""
             let line = hitGoal ? "Today counts · \(st.streak)-day streak" : "\(fmtMinutes(st.todayMinutes)) today" + (st.todayMinutes < goal ? " · \(goal - st.todayMinutes) min to make today count" : "")
             show(Card(icon: hitGoal ? "flame.fill" : "checkmark.circle.fill", tint: hitGoal ? "orange" : "green",
                       title: hitGoal ? "Today counts. \(b.task ?? "Session") done" : (b.task ?? "Session done"),
-                      subtitle: "\(focused) min focused · \(line)", buttons: breakButtons))
+                      subtitle: "\(focused) min focused\(idleNote) · \(line)", buttons: breakButtons))
         } else if focused >= 5 {
             show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early",
                       subtitle: "\(focused) of \(b.minutes) min. The minutes still count · \(fmtMinutes(st.todayMinutes)) today"), close: 3.5)
@@ -508,6 +604,7 @@ final class Engine: ObservableObject {
                 appendLog(["type": "postponed", "task": t.task, "minutes": 10])
                 updateTodo(id, start: hhmm(Date().addingTimeInterval(600)))
             }
+        case .equipSkin(let id): Skin.equip(id)
         case .lockInEvent(let id):
             if let ev = events.first(where: { $0.id == id }) {
                 startSession(task: ev.title, minutes: max(5, Int(ev.end.timeIntervalSince(Date()) / 60)))
@@ -582,7 +679,7 @@ final class Engine: ObservableObject {
         guard cfg.check_ins ?? true, let b = block, b.kind == "focus", b.minutes >= 15, card == nil else { return }
         if progress >= 0.5, checkedIn.half != b.started {
             checkedIn.half = b.started
-            let focused = max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
+            let focused = b.tracked ? b.countedMinutes : max(0, Int((now.timeIntervalSince1970 - b.started - b.offSeconds) / 60))
             showFlash(drifting ? "Halfway. Come back to \(b.task ?? "it")" : "Halfway · \(focused) min focused so far",
                       icon: "circle.lefthalf.filled", tint: drifting ? "red" : "green")
         } else if remaining <= 60, checkedIn.last != b.started {
@@ -598,8 +695,9 @@ final class Engine: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 let ctx = Detect.context()
                 let idle = Detect.idleSeconds()
+                let realIdle = Detect.secondsSinceRealInput()
                 let frame = Detect.windowFrame(of: ctx.app)
-                Task { @MainActor in self.evaluate(ctx, idle: idle, frame: frame, preset: p); self.checking = false }
+                Task { @MainActor in self.evaluate(ctx, idle: idle, realIdle: realIdle, frame: frame, preset: p); self.checking = false }
             }
         } else if block == nil, earning {
             checking = true
@@ -629,8 +727,10 @@ final class Engine: ObservableObject {
         return ("neutral", nil)
     }
 
-    private func evaluate(_ c: FrontContext, idle: Double, frame: NSRect?, preset p: Preset) {
+    private func evaluate(_ c: FrontContext, idle: Double, realIdle: Double, frame: NSRect?, preset p: Preset) {
         guard var b = block, b.kind == "focus" else { return }
+        let dt = min(10, Date().timeIntervalSince(lastEval ?? Date().addingTimeInterval(-2)))
+        lastEval = Date()
         // A site the rule explicitly allows wins over the cover (e.g. a NeetCode video on YouTube during LeetCode).
         let allowed = anyIn(c.url + " " + c.title, p.sites) != nil
         var (state, what) = classify(c, p)
@@ -651,11 +751,19 @@ final class Engine: ObservableObject {
             state = "off"; what = "Away from your Mac for \(Int(idle / 60)) min"
         } else if idle > (cfg.away_seconds ?? 45), state == "off" { state = "neutral" }
 
+        // What this moment earns: on task with real input lately counts; away on an offline-ok task counts; just
+        // being here (or a mouse jiggler) doesn't.
+        if state != "off" {
+            if realIdle < Engine.activeWindow { b.activeSeconds = (b.activeSeconds ?? 0) + dt }
+            else if p.offline_ok == true { b.offlineSeconds = (b.offlineSeconds ?? 0) + dt }
+            else { b.idleSeconds = (b.idleSeconds ?? 0) + dt }
+            block = b
+        }
         guard state == "off", Date() >= snoozeUntil else {
             if state != "off" { driftSince = nil; lastNudge = nil; drifting = false }
             return
         }
-        b.offSeconds += 2; block = b
+        b.offSeconds += dt; block = b
         if driftSince == nil { driftSince = Date() }
         let away = what?.hasPrefix("Away") ?? false
         let offFor = Date().timeIntervalSince(driftSince!)
@@ -817,8 +925,32 @@ final class Engine: ObservableObject {
         chat.append(ChatMsg(role: "user", text: t))
         _ = TodoDoc.load()     // roll the day over before the helper reads the file
         let cfg = self.cfg
+        if cfg.ai?.provider == "apple" {      // Apple Intelligence runs in the app; the helper writes the prompt and applies the answer
+            Task.detached(priority: .userInitiated) {
+                var out = ""
+                do {
+                    let p = (try? JSONSerialization.jsonObject(with: Data(runCoach(["prompt", day.rawValue], input: t).utf8))) as? [String: Any]
+                    guard let prompt = p?["prompt"] as? String else { throw AppleAI.failure(p?["error"] as? String ?? "couldn't build the prompt") }
+                    let answer = try await AppleAI.plan(prompt: prompt)
+                    let payload: [String: Any] = ["text": t, "result": (try? JSONSerialization.jsonObject(with: Data(answer.utf8))) ?? [:]]
+                    out = runCoach(["apply", day.rawValue], input: String(data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8))
+                } catch {
+                    out = String(data: (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription])) ?? Data(), encoding: .utf8) ?? ""
+                }
+                let result = out
+                await MainActor.run { self.finishPlanning(result, day: day, cfg: cfg) }
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let out = runCoach(["todos", day.rawValue], input: t)
+            Task { @MainActor in self.finishPlanning(out, day: day, cfg: cfg) }
+        }
+    }
+
+    /// After the AI planner answers: new tasks get their apps, then the plan reloads (or the error shows).
+    private func finishPlanning(_ out: String, day: PlanDay, cfg: Config) {
+        DispatchQueue.global(qos: .userInitiated).async {
             let history = TaskMatch.history()
             var d = TodoDoc.load()
             var changed = false
@@ -892,6 +1024,7 @@ final class Engine: ObservableObject {
         }
         minuteCount += 1
         if minuteCount % 10 == 0 { refreshEvents() }
+        if block?.kind == "focus" { persist() }
         todayMinutes = finishedToday()
         morningCheck(); duePlanned(); dueEvents(); idleNudge()
         let f = DateFormatter(); f.dateFormat = "HH:mm"

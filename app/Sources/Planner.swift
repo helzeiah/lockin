@@ -138,7 +138,7 @@ struct TodayView: View {
             composer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(VisualEffect(material: .underWindowBackground))
+        .background(AppBackground())
         .onChange(of: e.planDay) { _, _ in editingId = nil }
     }
 
@@ -279,7 +279,7 @@ struct TodayView: View {
             }
             if let err = e.planError { Text("Couldn't update the plan: \(err)").font(.system(size: 12)).foregroundStyle(Theme.danger) }
             QuickAddField(day: day, autoFocus: items.isEmpty,
-                          placeholder: items.isEmpty ? "leetcode 45, co-op web ui 90 at 2pm, essay intro 30" : "Add more, or say what changed…")
+                          placeholder: items.isEmpty ? "leetcode 45, co-op web ui 90 at 2pm, essay intro 30" : "Add more, or edit: done leetcode, essay at 3pm, free at 8…")
             HStack {
                 summary
                 Spacer()
@@ -445,7 +445,7 @@ struct QuickAddField: View {
     @State private var text = ""
     @FocusState private var focused: Bool
 
-    private var preview: [ParsedTask] { e.cfg.aiOn ? [] : PlanParser.parse(text) }
+    private var preview: [PlanCommand] { e.cfg.aiOn ? [] : PlanParser.commands(text) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -468,22 +468,13 @@ struct QuickAddField: View {
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.primary.opacity(0.06)))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(focused ? Theme.accent.opacity(0.7) : Theme.hairline, lineWidth: 1))
             if !preview.isEmpty {
-                FlowLayout(spacing: 6) {
-                    ForEach(Array(preview.enumerated()), id: \.offset) { _, p in
-                        HStack(spacing: 5) {
-                            Text(p.task).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
-                            Text([p.minutes.map { "\($0)m" } ?? "45m", p.start.map(clockLabel) ?? (day == .today ? "next open" : "")]
-                                    .filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(.system(size: 11, design: .rounded)).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(Theme.accent.opacity(0.14)))
-                    }
-                }
+                PlanPreviewChips(commands: preview, day: day)
+            } else if let note = e.planNote {
+                Label(note, systemImage: "checkmark.circle.fill").font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
             } else {
                 Text(e.planning ? (e.cfg.aiOn ? "Planning…" : "Adding…")
                      : e.cfg.aiOn ? "Return sends it to the AI planner · it sees your plan and calendar"
-                                  : "Return adds it · a length like 45 or 1.5h, a time like at 2pm")
+                                  : "Return applies it · try: done leetcode · essay at 3pm · push emails to tomorrow · free at 8")
                     .font(.system(size: 11.5)).foregroundStyle(.tertiary)
             }
         }
@@ -494,7 +485,44 @@ struct QuickAddField: View {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !e.planning else { return }
         text = ""
-        if e.cfg.aiOn { e.sendToPlanner(t, day: day) } else { e.addParsed(t, day: day) }
+        if e.cfg.aiOn { e.sendToPlanner(t, day: day) } else { e.applyTyped(t, day: day) }
+    }
+}
+
+/// What the plan box will do with what you've typed, as chips (no AI): add, done, move, tomorrow, remove, re-time.
+struct PlanPreviewChips: View {
+    @EnvironmentObject var e: Engine
+    var commands: [PlanCommand]
+    var day: PlanDay
+    /// How a typed line will be applied, as a chip: icon, text, detail.
+    private func chip(_ c: PlanCommand) -> (String, String, String) {
+        switch c {
+        case .add(let p):
+            if let s = p.start, p.minutes == nil, let t = e.match(p.task, in: e.list(day), open: true) { return ("clock.arrow.circlepath", t.task, "→ \(clockLabel(e.adjusted(s, day)))") }
+            return ("plus", p.task, [p.minutes.map { "\($0)m" } ?? "45m", p.start.map(clockLabel) ?? (day == .today ? "next open" : "")].filter { !$0.isEmpty }.joined(separator: " · "))
+        case .done(let q): return ("checkmark", e.match(q, in: e.list(day), open: true)?.task ?? q, "done")
+        case .remove(let q): return ("xmark", e.match(q, in: e.list(day), open: false)?.task ?? q, "remove")
+        case .move(let q, let s): return ("clock.arrow.circlepath", e.match(q, in: e.list(day), open: true)?.task ?? q, "→ \(clockLabel(e.adjusted(s, day)))")
+        case .tomorrow(let q): return ("arrow.right", e.match(q, in: e.todos, open: true)?.task ?? q, "→ tomorrow")
+        case .resize(let q, let m): return ("timer", e.match(q, in: e.list(day), open: true)?.task ?? q, "\(m) min")
+        case .startFrom(let s): return ("arrow.down.to.line", "Re-time what's left", "from \(clockLabel(e.adjusted(s, day)))")
+        }
+    }
+
+
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(Array(commands.enumerated()), id: \.offset) { _, c in
+                let (icon, title, detail) = chip(c)
+                HStack(spacing: 5) {
+                    Image(systemName: icon).font(.system(size: 9.5, weight: .bold)).foregroundStyle(Theme.accent)
+                    Text(title).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                    Text(detail).font(.system(size: 11, design: .rounded)).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Theme.accent.opacity(0.14)))
+            }
+        }
     }
 }
 

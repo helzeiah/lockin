@@ -171,9 +171,8 @@ def clean_item(it):
             "why": " ".join(str(it.get("why") or "").split())[:60]}
 
 
-def todos_from_ai(text, day="today"):
-    """Conversational planner: builds a day's plan from a dump, or edits it from a message like
-    "finished the stats hw", "free at 8 now", "add laundry", "push the essay to tomorrow"."""
+def plan_context(text, day="today"):
+    """Everything the AI planner needs: the prompt, the answer's schema, and the plan it edits."""
     cfgj = load_config()
     tomorrow = day == "tomorrow"
     doc = load_doc()
@@ -239,7 +238,19 @@ Backlog (not part of the plan unless they ask): {json.dumps(back)}
 
 Their message:
 {text[:4000]}"""
-    res = ai.ask_json(cfgj, prompt, schema)
+    return {"cfg": cfgj, "prompt": prompt, "schema": schema, "doc": doc, "items": items, "backlog": backlog, "chat": chat, "tomorrow": tomorrow}
+
+
+def todos_from_ai(text, day="today"):
+    """Conversational planner: builds a day's plan from a dump, or edits it from a message like
+    "finished the stats hw", "free at 8 now", "add laundry", "push the essay to tomorrow"."""
+    ctx = plan_context(text, day)
+    return apply_plan(ctx, text, ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"]))
+
+
+def apply_plan(ctx, text, res):
+    """Checks the AI's answer and writes it into the plan (keeping what the app knows about each item)."""
+    doc, items, backlog, chat, tomorrow = ctx["doc"], ctx["items"], ctx["backlog"], ctx["chat"], ctx["tomorrow"]
     if not isinstance(res, dict) or not isinstance(res.get("items"), list):
         raise ai.AIError("the AI's answer wasn't a plan: try again")
     known = {t["id"]: t for t in items} | {b["id"]: b for b in backlog}
@@ -365,10 +376,23 @@ def recap():
 
 if __name__ == "__main__":
     cmd = (sys.argv[1:] or ["plan"])[0]
+    day = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] in ("today", "tomorrow") else "today"
     if cmd == "todos":
         try:
-            print(json.dumps(todos_from_ai(sys.stdin.read(), sys.argv[2] if len(sys.argv) > 2 else "today")))
+            print(json.dumps(todos_from_ai(sys.stdin.read(), day)))
         except Exception as e:  # reported back to the planner window
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd == "prompt":     # Apple Intelligence runs in the app: hand it the prompt...
+        try:
+            print(json.dumps({"prompt": plan_context(sys.stdin.read(), day)["prompt"]}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd == "apply":      # ...then take its answer back: {"text": what they typed, "result": the model's JSON}
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+            text = str(payload.get("text") or "")
+            print(json.dumps(apply_plan(plan_context(text, day), text, payload.get("result"))))
+        except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd == "slot":
         mins = int(sys.argv[2]) if len(sys.argv) > 2 else 45

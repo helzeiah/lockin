@@ -126,3 +126,40 @@ class AIClient(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromptAndApply(unittest.TestCase):
+    """Apple Intelligence runs in the app: the helper builds the prompt, then applies the model's answer."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.coach = load(self.tmp.name)
+        (Path(self.tmp.name) / "config.json").write_text(json.dumps({"ai": {"provider": "apple"}}))
+        (Path(self.tmp.name) / "todos.json").write_text(json.dumps({"date": "2026-11-23", "items": [
+            {"id": "a1", "task": "Essay", "minutes": 45, "start": "10:00", "apps": ["Pages"], "block": "Writing"}]}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_prompt_mentions_the_plan(self):
+        p = self.coach.plan_context("finished the essay", "today")["prompt"]
+        self.assertIn("Essay", p)
+        self.assertIn("finished the essay", p)
+
+    def test_apply_keeps_apps_and_checks_the_answer(self):
+        ctx = self.coach.plan_context("add gym", "today")
+        out = self.coach.apply_plan(ctx, "add gym", {"items": [
+            {"ref": "a1", "task": "Essay", "minutes": 45, "start": "10:00", "done": False, "why": ""},
+            {"ref": "new", "task": "Gym", "minutes": 999, "start": "7pm", "done": False, "why": ""}], "reply": "Added gym."})
+        essay, gym = out["items"]
+        self.assertEqual(essay["apps"], ["Pages"])
+        self.assertEqual(essay["block"], "Writing")
+        self.assertEqual(gym["minutes"], 240)
+        self.assertEqual(gym["start"], "")
+        self.assertEqual(gym["block"], "")
+        saved = json.loads((Path(self.tmp.name) / "todos.json").read_text())
+        self.assertEqual([t["task"] for t in saved["items"]], ["Essay", "Gym"])
+
+    def test_rejects_a_non_plan(self):
+        ctx = self.coach.plan_context("x", "today")
+        with self.assertRaises(Exception):
+            self.coach.apply_plan(ctx, "x", {"nope": 1})

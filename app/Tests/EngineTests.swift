@@ -112,13 +112,54 @@ struct EngineTests {
         let st = Stats.load()
         check(st.keptCount(Stats.today) == 1 && st.ended(Stats.today) == 2 && st.skips[Stats.today] == 1, "stats: 1 kept, 2 ended, 1 skip")
 
-        // Rewards: XP from the log, levels, badges.
+        // Typed edits without AI.
+        e.clearDay(.today)
+        e.addTodo(task: "LeetCode mediums", minutes: 45, start: "09:00")
+        e.addTodo(task: "Write the essay intro", minutes: 30, start: "10:00")
+        e.addTodo(task: "Reply to emails", minutes: 20, start: "")
+        e.applyTyped("done leetcode", day: .today)
+        check(e.todos.first { $0.task == "LeetCode mediums" }?.isDone == true, "done leetcode marks it done")
+        e.applyTyped("essay at 23:30", day: .today)
+        check(e.todos.first { $0.task == "Write the essay intro" }?.start == "23:30", "essay at a time moves it, no new task")
+        check(e.todos.count == 3, "no duplicate added for a move: \(e.todos.map(\.task))")
+        e.applyTyped("push emails to tomorrow", day: .today)
+        check(e.tomorrow.contains { $0.task == "Reply to emails" } && !e.todos.contains { $0.task == "Reply to emails" }, "moves to tomorrow")
+        e.applyTyped("make essay 60 min", day: .today)
+        check(e.todos.first { $0.task == "Write the essay intro" }?.minutes == 60, "resizes")
+        e.applyTyped("gym 60 at 23:00, remove essay", day: .today)
+        while e.planning { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }   // new tasks land in the background
+        check(e.todos.contains { $0.task == "gym" } && !e.todos.contains { $0.task == "Write the essay intro" }, "adds and removes in one line")
+        check(e.planNote?.contains("Removed") == true, "says what it did")
+        e.addTodo(task: "Problem set", minutes: 30, start: "")
+        let moved = e.reflow(from: "22:00", day: .today)
+        check(moved == 2 && e.todos.first { $0.task == "gym" }?.start == "22:00", "re-times what's left from a time")
+
+        // Rewards: only signed, active work earns XP; edited lines earn nothing.
+        func signed(_ fields: [String: Any]) -> [String: Any] { var f = fields; f["sig"] = Integrity.sign(f); return f }
+        let ts = logTimestamp(Date().addingTimeInterval(-3600))
+        let real = signed(["type": "block_end", "ts": ts, "task": "Essay", "planned_min": 50, "focused_min": 50, "active_min": 50,
+                           "offline_min": 0, "completed": true])
+        let idle = signed(["type": "block_end", "ts": ts, "task": "Fake", "planned_min": 60, "focused_min": 2, "active_min": 2,
+                           "offline_min": 0, "completed": true])
+        var forged = real; forged["active_min"] = 500; forged["focused_min"] = 500
+        let lines = [real, idle, forged].map { String(data: try! JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }
+        try! (lines.joined(separator: "\n") + "\n").write(to: Paths.log, atomically: true, encoding: .utf8)
         let r = Rewards.load(goal: 25)
-        check(r.xp > 0 && r.level >= 1, "XP from finished sessions")
-        check(r.badges.first { $0.id == "first" }?.earned != nil, "first lock-in badge")
+        check(r.xp == 50 + 10 + 25 + 2, "XP: 50 active + finish bonus + day bonus + 2 (no bonus for an idle session, forged line ignored): \(r.xp)")
+        check(r.badges.first { $0.id == "first" }?.earned != nil, "first lock-in badge from the real session")
+        check(Stats.load().todayMinutes == 52, "stats ignore the edited line: \(Stats.load().todayMinutes)")
+        check(Integrity.valid(real) && !Integrity.valid(forged), "signature catches an edit")
         check(Rewards.levelStart(2) == 100 && Rewards.levelStart(3) == 300, "level curve")
         var big = Rewards(); big.xp = 1000
         check(big.level == 5 && big.title == "Locked In", "level 5 at 1000 XP")
+
+        // Skins: only what your level unlocked can be equipped.
+        Skin.noteLevel(1)
+        UserDefaults.standard.set("vault", forKey: "skin")
+        check(Skin.current.id == "green", "a locked skin falls back to the default")
+        Skin.noteLevel(14)
+        check(Skin.current.id == "vault", "an unlocked skin applies once equipped")
+        UserDefaults.standard.removeObject(forKey: "skin"); UserDefaults.standard.removeObject(forKey: "rewardLevel")
 
         if failures == 0 { print("Engine: all tests passed") } else { print("Engine: \(failures) failed"); exit(1) }
     }

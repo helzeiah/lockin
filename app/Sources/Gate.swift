@@ -83,6 +83,7 @@ struct GateView: View {
         ZStack {
             VisualEffect(material: .fullScreenUI)
             Color.black.opacity(0.6)
+            SkinWash(strength: 1.4)
             ScrollView {
                 VStack(spacing: 0) {
                     header.padding(.top, 70)
@@ -109,8 +110,11 @@ struct GateView: View {
                 .font(.system(size: 12, weight: .semibold)).tracking(1.2).foregroundStyle(.secondary)
             Text(greeting).font(.system(size: 40, weight: .bold)).tracking(-0.8)
             HStack(spacing: 10) {
-                pill(icon: "flame.fill", tint: st.streak > 0 ? Theme.flame : .secondary,
-                     text: st.streak > 0 ? "\(st.streak)-day streak" : "No streak yet")
+                HStack(spacing: 6) {
+                    StreakFire(streak: st.streak, size: 15)
+                    Text(st.streak > 0 ? "\(st.streak)-day streak" : "No streak yet").font(.system(size: 12.5, weight: .medium))
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6).background(Capsule().fill(.white.opacity(0.08)))
                 pill(icon: "clock.arrow.circlepath", tint: .secondary, text: yesterdayLine)
                 pill(icon: "target", tint: Theme.accent, text: "Goal \(fmtMinutes(st.goal))")
             }

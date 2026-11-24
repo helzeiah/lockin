@@ -78,6 +78,7 @@ struct MainView: View {
         }
         .padding(.horizontal, 10).padding(.top, 38).padding(.bottom, 10)
         .frame(maxHeight: .infinity, alignment: .top)
+        .background(SkinWash(strength: 1.1).ignoresSafeArea())
     }
 
     private func row(_ t: PlannerTab) -> some View {
@@ -113,7 +114,7 @@ struct MainView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(VisualEffect(material: .underWindowBackground))
+            .background(AppBackground())
             .onDisappear { settings.save(includeKey: false) }
         }
     }
@@ -124,14 +125,17 @@ struct SidebarStreak: View {
     @EnvironmentObject var e: Engine
     var body: some View {
         let st = e.stats()
+        let level = Rewards.load(goal: st.goal).level
         HStack(spacing: 10) {
-            Ring(progress: Double(st.todayMinutes) / Double(max(1, st.goal)), color: Theme.accent, size: 22, width: 3, track: Color.primary.opacity(0.1))
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Lv \(Rewards.load(goal: st.goal).level) · \(st.todayMinutes)/\(st.goal) min").font(.system(size: 11.5, weight: .medium)).monospacedDigit()
-                HStack(spacing: 3) {
-                    Image(systemName: "flame.fill").font(.system(size: 9)).foregroundStyle(st.streak > 0 ? Theme.flame : .secondary)
-                    Text("\(st.streak)-day streak").font(.system(size: 10.5)).foregroundStyle(.secondary)
+            LevelEmblem(level: level, size: 28, pips: false)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Rewards.title(level)).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 4) {
+                    Text("Lv \(level) ·").font(.system(size: 10.5, weight: .medium))
+                    StreakFire(streak: st.streak, size: 12)
+                    Text("\(st.streak) days").font(.system(size: 10.5)).monospacedDigit()
                 }
+                .foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 8)

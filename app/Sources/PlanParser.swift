@@ -101,3 +101,64 @@ enum PlanParser {
         s.replacingOccurrences(of: pattern, with: t, options: .regularExpression)
     }
 }
+
+// MARK: - Edits without AI
+
+/// One thing typed into the plan box: a new task, or an edit to the plan.
+///   "done leetcode" / "leetcode done"      mark it done
+///   "remove emails" / "drop" / "cancel"     take it off the plan
+///   "move essay to 3pm" / "push essay to 4" change its time
+///   "push essay to tomorrow"                move it to tomorrow
+///   "make essay 30 min"                     change its length
+///   "free at 8" / "starting at 3pm"         re-time what's left, starting then
+/// Anything else is a new task. Which task an edit means is decided against the plan (by its words).
+enum PlanCommand: Equatable {
+    case add(ParsedTask)
+    case done(String)
+    case remove(String)
+    case move(String, start: String)
+    case tomorrow(String)
+    case resize(String, minutes: Int)
+    case startFrom(String)
+}
+
+extension PlanParser {
+    static func commands(_ text: String) -> [PlanCommand] {
+        text.components(separatedBy: CharacterSet(charactersIn: "\n,;•")).compactMap(command)
+    }
+
+    static func command(_ raw: String) -> PlanCommand? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        let lower = s.lowercased()
+        func m(_ pattern: String) -> [String]? {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let r = re.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) else { return nil }
+            return (0..<r.numberOfRanges).map { i in Range(r.range(at: i), in: lower).map { String(lower[$0]) } ?? "" }
+        }
+        func q(_ text: String) -> String {
+            text.replacingOccurrences(of: #"^(?:the|my)\s+"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+        }
+        if let g = m(#"^(?:i'?m\s+)?(?:free|available|back|starting|start)\s+(?:at|from|after|around)\s+(.+)$"#), let t = time(g[1]) {
+            return .startFrom(t)
+        }
+        if let g = m(#"^(?:done|finished|did|completed|complete)\s+(?:with\s+)?(.+)$"#) { return .done(q(g[1])) }
+        if let g = m(#"^(.+?)\s+(?:is\s+)?(?:done|finished|completed|complete)$"#) { return .done(q(g[1])) }
+        if let g = m(#"^(?:remove|drop|delete|cancel|scrap|skip)\s+(.+)$"#) { return .remove(q(g[1])) }
+        if let g = m(#"^(?:move|push|bump|punt|save)\s+(.+?)\s+(?:to|for|till|until)\s+tomorrow$"#) { return .tomorrow(q(g[1])) }
+        if let g = m(#"^(?:move|push|bump|reschedule|shift)\s+(.+?)\s+(?:to|at|till|until)\s+(.+)$"#), let t = time(g[2]) {
+            return .move(q(g[1]), start: t)
+        }
+        if let g = m(#"^(?:make|change|set)\s+(.+?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*(m|min|mins|minutes|h|hr|hrs|hour|hours)$"#),
+           let n = Double(g[2]) {
+            let minutes = g[3].hasPrefix("h") ? Int((n * 60).rounded()) : Int(n)
+            return .resize(q(g[1]), minutes: min(max(minutes, 5), 480))
+        }
+        return parseOne(s).map(PlanCommand.add)
+    }
+
+    /// "8", "8pm", "8:30", "14:00" as "HH:MM" (a bare 1-7 means the afternoon).
+    static func time(_ text: String) -> String? {
+        parseOne("t at " + text.trimmingCharacters(in: .whitespaces))?.start
+    }
+}

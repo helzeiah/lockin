@@ -37,6 +37,7 @@ struct MenuContent: View {
             .padding(.horizontal, 6).padding(.vertical, 6)
         }
         .frame(width: 300)
+        .background(SkinWash(strength: 1.3))
         .tint(Theme.accent)
     }
 

@@ -33,6 +33,25 @@ func t(_ task: String, _ minutes: Int? = nil, _ start: String? = nil) -> ParsedT
         expect("night review 11pm 30m", [t("night review", 30, "23:00")])
         expect("fix login bug 45 minutes", [t("fix login bug", 45)])
         expect("marathon session 600", [t("marathon session 600")])
+        // Edits without AI
+        func cmd(_ input: String, _ want: [PlanCommand], line: Int = #line) {
+            let got = PlanParser.commands(input)
+            if got != want { failures += 1; print("FAIL line \(line): \(input.debugDescription)\n  want \(want)\n  got  \(got)") }
+        }
+        cmd("done leetcode", [.done("leetcode")])
+        cmd("finished the stats hw", [.done("stats hw")])
+        cmd("leetcode done", [.done("leetcode")])
+        cmd("remove emails", [.remove("emails")])
+        cmd("move essay to 3pm", [.move("essay", start: "15:00")])
+        cmd("push essay intro to tomorrow", [.tomorrow("essay intro")])
+        cmd("make essay 30 min", [.resize("essay", minutes: 30)])
+        cmd("make co-op 1.5h", [.resize("co-op", minutes: 90)])
+        cmd("free at 8", [.startFrom("08:00")])
+        cmd("i'm free at 7:30pm", [.startFrom("19:30")])
+        cmd("done leetcode, gym 60 at 6, push emails to tomorrow", [.done("leetcode"), .add(t("gym", 60, "18:00")), .tomorrow("emails")])
+        cmd("do laundry 30", [.add(t("do laundry", 30))])
+        cmd("finish essay intro 45", [.add(t("finish essay intro", 45))])
+
         if failures == 0 { print("PlanParser: all tests passed") } else { print("PlanParser: \(failures) failed"); exit(1) }
     }
 }
