@@ -7,6 +7,24 @@ import SwiftUI
 final class BlockerPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) {}
+
+    /// Shortcuts act on what's covered, never on lockin: ⌘Q quits the covered app (over a site, closes the tab),
+    /// ⌘W closes the tab or hides the app, ⌘H hides it. Every other ⌘ key is swallowed so none reaches lockin's menu.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard mods.contains(.command) else { return super.performKeyEquivalent(with: event) }
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        MainActor.assumeIsolated {
+            let e = Engine.shared
+            switch (mods, key) {
+            case (.command, "q"): e.quitBlocked()
+            case (.command, "w"): e.closeOrHideBlocked()
+            case (.command, "h"): e.hideBlockedApp()
+            default: break
+            }
+        }
+        return true
+    }
 }
 
 // Covers a distracting tab or app with real macOS blur. The tab stays open underneath; the app keeps running
@@ -139,6 +157,8 @@ struct BlockerCard: View {
                     .disabled(wait > 0).padding(.top, 12)
                 }
                 Text(footnote).font(.system(size: 11.5)).foregroundStyle(.tertiary).multilineTextAlignment(.center).padding(.top, 14)
+                Text(isSite && isBrowser ? "⌘Q or ⌘W closes the tab" : "⌘Q quits \(thing)")
+                    .font(.system(size: 11.5)).foregroundStyle(.tertiary).padding(.top, 4)
             }
             .padding(30)
             .frame(width: 390)

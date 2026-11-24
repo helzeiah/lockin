@@ -854,6 +854,20 @@ final class Engine: ObservableObject {
         NSWorkspace.shared.runningApplications.first { $0.localizedName == app }?.hide()
         backToWork()
     }
+    /// ⌘Q on the cover: quits the covered app. Over a site the browser may be one you need, so the tab closes instead.
+    func quitBlocked() {
+        guard let b = blocked else { return }
+        if !b.site.isEmpty, Detect.browsers[b.app] != nil { closeBlockedTab(); return }
+        guard !neverCover(b.app), let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == b.app }) else { return }
+        appendLog(["type": "quit_blocked", "app": b.app, "during": block?.name ?? "free time"])
+        app.terminate()
+        backToWork()
+    }
+    /// ⌘W on the cover: closes the covered tab, or hides the covered app.
+    func closeOrHideBlocked() {
+        guard let b = blocked else { return }
+        if !b.site.isEmpty, Detect.browsers[b.app] != nil { closeBlockedTab() } else { hideBlockedApp() }
+    }
     func closeBlockedTab() {
         guard let app = blocked?.app else { return }
         Detect.osa(Detect.browsers[app] == "safari" ? "tell application \"Safari\" to close current tab of front window"
