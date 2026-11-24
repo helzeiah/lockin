@@ -387,10 +387,27 @@ final class Engine: ObservableObject {
         }
         let before = todayMinutes
         let st = stats()
+        let rBefore = rewardsCache ?? Rewards.load(goal: goal)
+        let rAfter = Rewards.load(goal: goal)
+        rewardsCache = rAfter
         todayMinutes = st.todayMinutes
         guard !silent else { return }
         let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
         let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
+        if rAfter.level > rBefore.level {
+            play("Hero", volume: 0.55)
+            let skin = Skin.all.first { $0.level == rAfter.level }
+            show(Card(icon: "arrow.up.circle.fill", tint: "green", title: "Level \(rAfter.level) · \(rAfter.title)",
+                      subtitle: "+\(rAfter.xp - rBefore.xp) XP" + (skin.map { " · unlocked the \($0.name) skin" } ?? ""),
+                      buttons: [CardButton(label: "See rewards", action: .openStats)] + breakButtons))
+            return
+        }
+        if let b = rAfter.badges.first(where: { nb in nb.earned != nil && rBefore.badges.contains { $0.id == nb.id && $0.earned == nil } }) {
+            play("Hero", volume: 0.5)
+            show(Card(icon: b.icon, tint: "orange", title: "Badge: \(b.name)", subtitle: b.how + " · +\(rAfter.xp - rBefore.xp) XP",
+                      buttons: [CardButton(label: "See badges", action: .openStats)] + breakButtons))
+            return
+        }
         if completed {
             if hitGoal, let m = milestone(st.streak) {
                 play("Hero", volume: 0.55)
@@ -430,6 +447,7 @@ final class Engine: ObservableObject {
         let key = "perfect-" + today()
         guard todos.count >= 2, todos.allSatisfy(\.isDone), !UserDefaults.standard.bool(forKey: key) else { return false }
         UserDefaults.standard.set(true, forKey: key)
+        appendLog(["type": "perfect_day", "sessions": todos.count])
         return true
     }
 
@@ -531,6 +549,7 @@ final class Engine: ObservableObject {
 
     /// Stats for the views. Reading the log is cheap but views redraw every second, so it's kept for 20 seconds.
     private var statsCache: (at: Date, session: Double?, value: Stats)?
+    private var rewardsCache: Rewards?
     func stats() -> Stats {
         if let c = statsCache, Date().timeIntervalSince(c.at) < 20, c.session == block?.started { return c.value }
         let s = Stats.load(goal: goal, weekGoal: cfg.stats_week_goal ?? 5, live: block)

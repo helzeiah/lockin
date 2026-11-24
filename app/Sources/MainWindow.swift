@@ -127,7 +127,7 @@ struct SidebarStreak: View {
         HStack(spacing: 10) {
             Ring(progress: Double(st.todayMinutes) / Double(max(1, st.goal)), color: Theme.accent, size: 22, width: 3, track: Color.primary.opacity(0.1))
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(st.todayMinutes)/\(st.goal) min today").font(.system(size: 11.5, weight: .medium)).monospacedDigit()
+                Text("Lv \(Rewards.load(goal: st.goal).level) · \(st.todayMinutes)/\(st.goal) min").font(.system(size: 11.5, weight: .medium)).monospacedDigit()
                 HStack(spacing: 3) {
                     Image(systemName: "flame.fill").font(.system(size: 9)).foregroundStyle(st.streak > 0 ? Theme.flame : .secondary)
                     Text("\(st.streak)-day streak").font(.system(size: 10.5)).foregroundStyle(.secondary)

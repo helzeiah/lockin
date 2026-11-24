@@ -2,7 +2,7 @@ import SwiftUI
 
 // The look: dark-first, one accent (the app icon's green), rounded numerals, quiet secondary text.
 enum Theme {
-    static let accent = Color(red: 0.21, green: 0.84, blue: 0.48)      // #36D67A, the ring in the app icon
+    static var accent: Color { Skin.current.color }                  // the icon's green unless you've unlocked a skin
     static let flame = Color(red: 1.0, green: 0.62, blue: 0.04)
     static let danger = Color(red: 1.0, green: 0.33, blue: 0.30)
     static let info = Color(red: 0.36, green: 0.66, blue: 1.0)
@@ -62,14 +62,30 @@ struct StreakBadge: View {
     var streak: Int
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "flame.fill").font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(streak > 0 ? Theme.flame : Color.secondary.opacity(0.6))
+            GlowFlame(streak: streak, size: 15)
             VStack(alignment: .leading, spacing: -1) {
                 Text("\(streak)").font(Theme.number(17)).monospacedDigit()
                 Text(streak == 1 ? "day" : "days").font(.system(size: 9.5, weight: .medium)).foregroundStyle(.secondary)
             }
         }
         .help(streak > 0 ? "\(streak)-day streak" : "No streak yet: hit today's goal to start one")
+    }
+}
+
+/// The streak flame: glows from a week on, and pulses from a month on.
+struct GlowFlame: View {
+    var streak: Int
+    var size: CGFloat = 15
+    @State private var pulse = false
+    var body: some View {
+        Image(systemName: "flame.fill").font(.system(size: size, weight: .semibold))
+            .foregroundStyle(streak > 0 ? Theme.flame : Color.secondary.opacity(0.6))
+            .shadow(color: streak >= 7 ? Theme.flame.opacity(pulse ? 0.95 : 0.6) : .clear, radius: streak >= 7 ? (pulse ? 9 : 5) : 0)
+            .scaleEffect(streak >= 30 && pulse ? 1.08 : 1)
+            .onAppear {
+                guard streak >= 30 else { pulse = streak >= 7; return }
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { pulse = true }
+            }
     }
 }
 

@@ -112,6 +112,14 @@ struct EngineTests {
         let st = Stats.load()
         check(st.keptCount(Stats.today) == 1 && st.ended(Stats.today) == 2 && st.skips[Stats.today] == 1, "stats: 1 kept, 2 ended, 1 skip")
 
+        // Rewards: XP from the log, levels, badges.
+        let r = Rewards.load(goal: 25)
+        check(r.xp > 0 && r.level >= 1, "XP from finished sessions")
+        check(r.badges.first { $0.id == "first" }?.earned != nil, "first lock-in badge")
+        check(Rewards.levelStart(2) == 100 && Rewards.levelStart(3) == 300, "level curve")
+        var big = Rewards(); big.xp = 1000
+        check(big.level == 5 && big.title == "Locked In", "level 5 at 1000 XP")
+
         if failures == 0 { print("Engine: all tests passed") } else { print("Engine: \(failures) failed"); exit(1) }
     }
 }

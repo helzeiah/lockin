@@ -309,6 +309,7 @@ struct StatsView: View {
     @EnvironmentObject var e: Engine
     @Environment(\.colorScheme) private var scheme
     @State private var stats = Stats()
+    @State private var rewards = Rewards()
 
     init() {}
 
@@ -316,6 +317,7 @@ struct StatsView: View {
         GeometryReader { geo in
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    LevelCard(r: rewards)
                     tiles
                     if stats.total == 0 {
                         Label("Finish a session and it shows up here. A day counts once you hit \(stats.goal) minutes.", systemImage: "sparkles")
@@ -335,6 +337,8 @@ struct StatsView: View {
                         }
                     }
                     section("This week, on the record") { record }
+                    section("Badges · \(rewards.earnedCount) of \(rewards.badges.count)") { BadgeGrid(badges: rewards.badges) }
+                    section("Skins") { SkinPicker(level: rewards.level) }
                     if !stats.byBlock.isEmpty { section("Where the time went") { blockSplit } }
                 }
                 .padding(.horizontal, 28).padding(.bottom, 24)
@@ -346,6 +350,7 @@ struct StatsView: View {
 
     private func reload() {
         stats = Stats.load(goal: e.cfg.stats_goal ?? 25, weekGoal: e.cfg.stats_week_goal ?? 5, live: e.block)
+        rewards = Rewards.load(goal: e.cfg.stats_goal ?? 25)
     }
 
     private var tiles: some View {
