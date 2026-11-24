@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Plan it. Lock in. Don't break the streak.</b><br>
-  The macOS app that won't let you skip your own day.
+  Take control of your day before your Mac takes it from you.
 </p>
 
 <p align="center">
