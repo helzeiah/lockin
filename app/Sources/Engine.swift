@@ -41,6 +41,7 @@ struct Card: Identifiable, Equatable {
     var autoClose: Double? = nil
     var countdown: Date? = nil       // shows "in 12s" and runs onTimeout when it reaches zero
     var onTimeout: CardAction? = nil
+    var xp: XPGain? = nil            // after a session: the XP bar fills from before to after
 }
 
 @MainActor
@@ -468,10 +469,11 @@ final class Engine: ObservableObject {
         // Only real work counts: active minutes, plus away time on offline-ok tasks. (Old sessions: elapsed minus off-task.)
         let focused = b.tracked ? min(elapsed, b.countedMinutes) : max(0, elapsed - Int(b.offSeconds / 60))
         let idleMin = Int(((b.idleSeconds ?? 0) / 60).rounded())
+        let activeMin = Int(((b.activeSeconds ?? 0) / 60).rounded()), offlineMin = Int(((b.offlineSeconds ?? 0) / 60).rounded())
+        let rBefore = Rewards.load(goal: goal)   // read before this session is in the log
         var entry: [String: Any] = ["type": "block_end", "ts": logTimestamp(), "name": b.name, "task": b.task ?? "", "completed": completed,
                                     "how": completed ? "timer" : how, "planned_min": b.minutes, "elapsed_min": elapsed, "focused_min": focused,
-                                    "active_min": Int(((b.activeSeconds ?? 0) / 60).rounded()), "offline_min": Int(((b.offlineSeconds ?? 0) / 60).rounded()),
-                                    "idle_min": idleMin, "apps": b.apps ?? []]
+                                    "active_min": activeMin, "offline_min": offlineMin, "idle_min": idleMin, "apps": b.apps ?? []]
         entry["sig"] = Integrity.sign(entry)
         appendLog(entry)
         if let id = b.todoId {
@@ -480,39 +482,37 @@ final class Engine: ObservableObject {
         }
         let before = todayMinutes
         let st = stats()
-        let rBefore = rewardsCache ?? Rewards.load(goal: goal)
         let rAfter = Rewards.load(goal: goal)
-        rewardsCache = rAfter
         todayMinutes = st.todayMinutes
         guard !silent else { return }
+        let xp = xpGain(rBefore.xp, rAfter.xp, worked: activeMin + offlineMin / 2, planned: b.minutes, completed: completed)
         let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
         let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
         Skin.noteLevel(rAfter.level)
-        if rAfter.level > rBefore.level {
-            play("Hero", volume: 0.55)
+        if rAfter.level > rBefore.level {   // the card plays the fanfare when its bar crosses into the new level
             let skin = Skin.all.last { $0.level > rBefore.level && $0.level <= rAfter.level }
             show(Card(icon: "emblem:\(rAfter.level)", tint: "green", title: "Level \(rAfter.level) · \(rAfter.title)",
-                      subtitle: "+\(rAfter.xp - rBefore.xp) XP" + (skin.map { " · unlocked the \($0.name) skin" } ?? ""),
+                      subtitle: skin.map { "Unlocked the \($0.name) skin" } ?? "",
                       buttons: (skin.map { [CardButton(label: "Equip \($0.name)", action: .equipSkin($0.id))] } ?? [CardButton(label: "See rewards", action: .openStats)])
-                        + breakButtons))
+                        + breakButtons, xp: xp))
             return
         }
         if let b = rAfter.badges.first(where: { nb in nb.earned != nil && rBefore.badges.contains { $0.id == nb.id && $0.earned == nil } }) {
             play("Hero", volume: 0.5)
-            show(Card(icon: b.icon, tint: "orange", title: "Badge: \(b.name)", subtitle: b.how + " · +\(rAfter.xp - rBefore.xp) XP",
-                      buttons: [CardButton(label: "See badges", action: .openStats)] + breakButtons))
+            show(Card(icon: b.icon, tint: "orange", title: "Badge: \(b.name)", subtitle: b.how,
+                      buttons: [CardButton(label: "See badges", action: .openStats)] + breakButtons, xp: xp))
             return
         }
         if completed {
             if hitGoal, let m = milestone(st.streak) {
                 play("Hero", volume: 0.55)
-                show(Card(icon: "flame.fill", tint: "orange", title: "\(st.streak)-day streak", subtitle: m, buttons: breakButtons))
+                show(Card(icon: "flame.fill", tint: "orange", title: "\(st.streak)-day streak", subtitle: m, buttons: breakButtons, xp: xp))
                 return
             }
             if perfectDay() {
                 play("Hero", volume: 0.5)
                 show(Card(icon: "star.fill", tint: "orange", title: "Perfect day", subtitle: "Every session you planned, done · \(fmtMinutes(st.todayMinutes)) focused",
-                          buttons: [CardButton(label: "Plan tomorrow", action: .planTomorrow), CardButton(label: "Nice", action: .dismiss, primary: true)]))
+                          buttons: [CardButton(label: "Plan tomorrow", action: .planTomorrow), CardButton(label: "Nice", action: .dismiss, primary: true)], xp: xp))
                 return
             }
             play(hitGoal ? "Hero" : "Glass", volume: hitGoal ? 0.5 : 0.45)
@@ -520,13 +520,26 @@ final class Engine: ObservableObject {
             let line = hitGoal ? "Today counts · \(st.streak)-day streak" : "\(fmtMinutes(st.todayMinutes)) today" + (st.todayMinutes < goal ? " · \(goal - st.todayMinutes) min to make today count" : "")
             show(Card(icon: hitGoal ? "flame.fill" : "checkmark.circle.fill", tint: hitGoal ? "orange" : "green",
                       title: hitGoal ? "Today counts. \(b.task ?? "Session") done" : (b.task ?? "Session done"),
-                      subtitle: "\(focused) min focused\(idleNote) · \(line)", buttons: breakButtons))
+                      subtitle: "\(focused) min focused\(idleNote) · \(line)", buttons: breakButtons, xp: xp))
         } else if focused >= 5 {
             show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early",
-                      subtitle: "\(focused) of \(b.minutes) min. The minutes still count · \(fmtMinutes(st.todayMinutes)) today"), close: 3.5)
+                      subtitle: "\(focused) of \(b.minutes) min. The minutes still count · \(fmtMinutes(st.todayMinutes)) today", xp: xp), close: xp == nil ? 3.5 : 6)
         } else {
-            show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early", subtitle: "Restarting is the skill. Try 10 minutes next."), close: 3)
+            show(Card(icon: "stop.circle.fill", tint: "white", title: "Ended early", subtitle: "Restarting is the skill. Try 10 minutes next.", xp: xp),
+                 close: xp == nil ? 3 : 5.5)
         }
+    }
+
+    /// The XP a session earned and where it came from (mirrors Rewards.load: worked minutes, +10 for finishing, the
+    /// rest is the bonus for making today count). Nil when it earned nothing.
+    private func xpGain(_ before: Int, _ after: Int, worked: Int, planned: Int, completed: Bool) -> XPGain? {
+        guard after > before else { return nil }
+        let finished = completed && worked >= max(5, planned / 2)
+        var parts = ["\(worked) min on task"]
+        if finished { parts.append("+10 finished") }
+        let bonus = after - before - worked - (finished ? 10 : 0)
+        if bonus > 0 { parts.append("+\(bonus) today counts") }
+        return XPGain(from: before, to: after, parts: parts)
     }
 
     /// A streak milestone worth its own card (once per run of the streak), with its line.
@@ -646,7 +659,6 @@ final class Engine: ObservableObject {
 
     /// Stats for the views. Reading the log is cheap but views redraw every second, so it's kept for 20 seconds.
     private var statsCache: (at: Date, session: Double?, value: Stats)?
-    private var rewardsCache: Rewards?
     func stats() -> Stats {
         if let c = statsCache, Date().timeIntervalSince(c.at) < 20, c.session == block?.started { return c.value }
         let s = Stats.load(goal: goal, weekGoal: cfg.stats_week_goal ?? 5, live: block)

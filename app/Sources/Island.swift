@@ -137,6 +137,8 @@ struct IslandView: View {
     @EnvironmentObject var e: Engine
     @EnvironmentObject var g: IslandGeo
     @State private var hover = false
+    /// On a level-up card: the level its bar has reached so far (nil until it crosses).
+    @State private var xpLevel: Int?
 
     static let wingMax: CGFloat = 66
     static let ear: CGFloat = 7
@@ -160,6 +162,7 @@ struct IslandView: View {
         .animation(spring, value: hover)
         .animation(spring, value: e.flash)
         .animation(spring, value: e.block?.started)
+        .onChange(of: e.card?.id) { xpLevel = nil }
     }
 
     /// Black, with a hairline on the lower edge so it reads as an object on dark wallpapers too.
@@ -301,16 +304,22 @@ struct IslandView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
                 if c.icon.hasPrefix("emblem:"), let lvl = Int(c.icon.dropFirst(7)) {   // level-up cards show the new rank
-                    LevelEmblem(level: lvl, size: 40, pips: false).frame(width: 46, height: 42)
+                    LevelUpEmblem(level: shownLevel(c) ?? lvl).frame(width: 46, height: 42)
                 } else {
                     Image(systemName: c.icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tintColor(c.tint))
                         .frame(width: 34, height: 34)
                         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tintColor(c.tint).opacity(c.tint == "white" ? 0.1 : 0.16)))
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(c.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                    if !c.subtitle.isEmpty {
+                    if let l = shownLevel(c) {   // rolls over to the new level when the bar gets there
+                        Text("Level \(l) · \(Rewards.title(l))").font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                            .contentTransition(.numericText())
+                    } else {
+                        Text(c.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                    }
+                    if !c.subtitle.isEmpty {   // a level-up's unlock shows once the level does
                         Text(c.subtitle).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.6)).lineLimit(3)
+                            .opacity(c.xp?.levelUp == true && shownLevel(c) != c.xp.map { Rewards.level(of: $0.to) } ? 0 : 1)
                     }
                     if let at = c.countdown {
                         let secs = max(0, Int(at.timeIntervalSince(e.now).rounded(.up)))
@@ -331,6 +340,13 @@ struct IslandView: View {
                         .frame(width: 22, height: 22).background(Circle().fill(.white.opacity(0.08)))
                 }
                 .buttonStyle(.plain).help("Close")
+            }
+            if let x = c.xp {
+                XPBar(gain: x) { l in
+                    if xpLevel == nil { e.play("Hero", volume: 0.55) }
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) { xpLevel = l }
+                }
+                .id(c.id)
             }
             if !c.lines.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -369,6 +385,137 @@ struct IslandView: View {
         }
         .padding(.horizontal, 18).padding(.top, 4).padding(.bottom, 16)
         .frame(width: max(420, geo.notchWidth + 160))
+    }
+}
+
+extension IslandView {
+    /// The level a level-up card shows right now: the old one until its bar crosses, then each new one.
+    fileprivate func shownLevel(_ c: Card) -> Int? {
+        guard let x = c.xp, x.levelUp, c.icon.hasPrefix("emblem:") else { return nil }
+        return xpLevel ?? Rewards.level(of: x.from)
+    }
+}
+
+/// The XP a session earned, counted up while the bar fills from where you were to where you are now. Crossing into a
+/// new level fills the bar, flashes it, rolls the level over and carries on from empty.
+struct XPBar: View {
+    let gain: XPGain
+    var onLevel: (Int) -> Void = { _ in }
+    @State private var shown: Double      // total XP the bar is drawing
+    @State private var label: Int         // the level printed above the bar
+    @State private var flash = false
+
+    init(gain: XPGain, onLevel: @escaping (Int) -> Void = { _ in }) {
+        self.gain = gain
+        self.onLevel = onLevel
+        _shown = State(initialValue: Double(gain.from))
+        _label = State(initialValue: Rewards.level(of: gain.from))
+    }
+
+    var body: some View {
+        XPBarFace(xp: shown, from: gain.from, level: label, parts: gain.parts, flash: flash)
+            .task { await run() }
+    }
+
+    private func pause(_ s: Double) async -> Bool { (try? await Task.sleep(for: .seconds(s))) != nil }
+
+    private func run() async {
+        guard await pause(0.55) else { return }      // let the card drop first
+        var at = gain.from
+        while at < gain.to {
+            let l = Rewards.level(of: at), next = Rewards.levelStart(l + 1)
+            let end = min(gain.to, next), crosses = end == next
+            let share = Double(end - at) / Double(next - Rewards.levelStart(l))
+            let t = 0.45 + 0.9 * share
+            // stop a hair short of the boundary so the bar shows full, not the next level's empty bar
+            withAnimation(.easeInOut(duration: t)) { shown = Double(end) - (crosses ? 0.001 : 0) }
+            guard await pause(t) else { return }
+            if crosses {
+                withAnimation(.easeOut(duration: 0.15)) { flash = true }
+                guard await pause(0.25) else { return }
+                var snap = Transaction(); snap.disablesAnimations = true
+                withTransaction(snap) { shown = Double(end) }
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { label = l + 1 }
+                onLevel(l + 1)
+                withAnimation(.easeOut(duration: 0.7)) { flash = false }
+                guard await pause(0.4) else { return }
+            }
+            at = end
+        }
+    }
+}
+
+/// One frame of the XP bar for a given running total (animatable, so the count and the fill move together).
+struct XPBarFace: View, Animatable {
+    var xp: Double
+    var from: Int
+    var level: Int
+    var parts: [String]
+    var flash: Bool
+    var animatableData: Double { get { xp } set { xp = newValue } }
+
+    var body: some View {
+        let l = Rewards.level(of: Int(xp.rounded(.down)))
+        let start = Rewards.levelStart(l), size = Rewards.levelStart(l + 1) - start
+        let fill = min(1, max(0, (xp - Double(start)) / Double(size)))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("+\(Int((xp - Double(from)).rounded())) XP").font(Theme.number(17, .bold)).monospacedDigit()
+                    .foregroundStyle(Theme.accent)
+                Spacer()
+                Text("Level \(level)").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.75))
+                    .contentTransition(.numericText())
+            }
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.1))
+                    Capsule().fill(Theme.accentFill).frame(width: fill > 0 ? max(8, g.size.width * fill) : 0)
+                    Capsule().fill(.white).opacity(flash ? 0.9 : 0)
+                }
+            }
+            .frame(height: 8)
+            .scaleEffect(x: 1, y: flash ? 1.6 : 1)
+            .shadow(color: Theme.accent.opacity(flash ? 0.9 : 0.3), radius: flash ? 10 : 4)
+            HStack {
+                Text(parts.joined(separator: " · ")).lineLimit(1)
+                Spacer(minLength: 8)
+                Text("\(Int((xp - Double(start)).rounded())) / \(size)").monospacedDigit()
+            }
+            .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.45))
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.white.opacity(0.05)))
+    }
+}
+
+/// The rank emblem on a level-up card: pops and sends out a ring each time the level changes.
+struct LevelUpEmblem: View {
+    var level: Int
+    @State private var pop = false
+    @State private var bursts = 0
+
+    var body: some View {
+        LevelEmblem(level: level, size: 40, pips: false)
+            .scaleEffect(pop ? 1.18 : 1)
+            .background { if bursts > 0 { BurstRing(color: level >= 20 ? LevelEmblem.gold : Theme.accent).id(bursts) } }
+            .onChange(of: level) {
+                bursts += 1
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.45)) { pop = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) { pop = false }
+                }
+            }
+    }
+}
+
+/// A ring that grows out of the emblem and fades, once.
+struct BurstRing: View {
+    var color: Color
+    @State private var go = false
+    var body: some View {
+        Circle().stroke(color, lineWidth: 2.5).frame(width: 40, height: 40)
+            .scaleEffect(go ? 2.1 : 0.7).opacity(go ? 0 : 1)
+            .onAppear { withAnimation(.easeOut(duration: 0.8)) { go = true } }
     }
 }
 

@@ -53,12 +53,21 @@ struct Skin: Identifiable, Hashable {
     static func noteLevel(_ level: Int) { UserDefaults.standard.set(level, forKey: "rewardLevel") }
 }
 
+/// What one session earned, for the bar on its card: total XP before and after, and where it came from.
+struct XPGain: Hashable {
+    var from: Int
+    var to: Int
+    var parts: [String] = []
+    var levelUp: Bool { Rewards.level(of: to) > Rewards.level(of: from) }
+}
+
 struct Rewards {
     var xp = 0
     var badges: [Badge] = []
 
     static func levelStart(_ level: Int) -> Int { 50 * level * (level - 1) }
-    var level: Int { var l = 1; while xp >= Rewards.levelStart(l + 1) { l += 1 }; return l }
+    static func level(of xp: Int) -> Int { var l = 1; while xp >= levelStart(l + 1) { l += 1 }; return l }
+    var level: Int { Rewards.level(of: xp) }
     var intoLevel: Int { xp - Rewards.levelStart(level) }
     var levelSize: Int { Rewards.levelStart(level + 1) - Rewards.levelStart(level) }
     var title: String { Rewards.title(level) }

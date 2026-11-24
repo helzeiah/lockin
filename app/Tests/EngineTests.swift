@@ -26,7 +26,7 @@ struct EngineTests {
         let weekday = cal.component(.weekday, from: todayD)
         try! json([
             "distractions": ["apps": ["Steam"], "sites": ["youtube.com"]], "block_sites": ["youtube.com"],
-            "lockin_apps": ["Xcode", "Safari"],
+            "lockin_apps": ["Xcode", "Safari"], "sounds": false,
             "blocks": [["name": "LeetCode / OA", "minutes": 45, "apps": ["Safari", "CLion"], "sites": ["leetcode.com"]],
                        ["name": "Co-op (Acme)", "minutes": 90, "apps": ["iTerm2", "Dia"], "projects": ["acme"]]],
             "routines": [["id": "r1", "task": "Morning review", "minutes": 20, "start": "08:00", "days": [weekday]]],
@@ -160,6 +160,17 @@ struct EngineTests {
         Skin.noteLevel(14)
         check(Skin.current.id == "vault", "an unlocked skin applies once equipped")
         UserDefaults.standard.removeObject(forKey: "skin"); UserDefaults.standard.removeObject(forKey: "rewardLevel")
+
+        // After a session its card shows what it earned (87 XP so far, today already counts); crossing 100 makes it
+        // the level-up card.
+        e.startSession(task: "Essay draft", minutes: 30, apps: ["Pages"])
+        e.block?.started -= 30 * 60; e.block?.activeSeconds = 30 * 60
+        e.stopBlock(completed: true)
+        let gain = e.card?.xp
+        check(gain?.from == 87 && gain?.to == 127 && gain?.parts == ["30 min on task", "+10 finished"], "card XP: \(String(describing: gain))")
+        check(gain?.levelUp == true && e.card?.icon == "emblem:2", "crossing a level shows the level-up card")
+        e.card = nil
+        UserDefaults.standard.removeObject(forKey: "rewardLevel")
 
         if failures == 0 { print("Engine: all tests passed") } else { print("Engine: \(failures) failed"); exit(1) }
     }
