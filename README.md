@@ -20,20 +20,25 @@
 
 - **Your day comes first.** The first time you use your Mac each day, your plan covers the screen. Lock in on the
   first session or start your day. Skipping takes a 3-second hold and a reason, and it goes on the record.
-- **Plan in one line.** Type `leetcode 45, essay intro 30 at 2pm` and lockin times it around your calendar. No AI
-  needed. An optional AI planner (your Claude subscription, an API key, or a local model) can rework the day for you.
+- **Plan in one line.** Type `leetcode 45, essay intro 30 at 2pm` and lockin times it around your calendar, then edit
+  with `done leetcode` or `free at 8`. No AI needed. An optional AI planner can rework the day for you: Apple
+  Intelligence on your Mac (free), your Claude subscription, an API key, or a local model.
 - **A block that holds.** A session allows only the few apps it needs, picked from the task's words. Everything else
   gets covered, and in Locked mode it gets hidden. The cover takes the keyboard too, so there's no typing around it.
 - **Earn your free time.** YouTube, games and the rest stay covered until today's goal is met. Then they're yours.
 - **Accountability you can see.** Streaks, a year of history, and an honest record: sessions kept vs. ended early,
   mornings skipped, passes taken. Planned sessions start on their own, and calendar events ask before they lock you in.
+- **Rank up by doing real work.** XP, seven ranks from Rookie to Legend, 16 badges, a streak fire that changes color the
+  longer you keep it, and skins you unlock and equip. Only active minutes count, so idling or a mouse jiggler earns nothing.
 
 <p align="center">
   <img src="docs/today.png" width="410" alt="Today: timed sessions with the apps each one allows">
   &nbsp;
   <img src="docs/cover.png" width="410" alt="The cover over a distracting site during a session">
 </p>
-<p align="center"><img src="docs/stats.png" width="560" alt="Stats: streak, last 14 days, a year of history and the week on the record"></p>
+<p align="center"><img src="docs/ranks.png" width="820" alt="Ranks from Locked In to Legend"></p>
+<p align="center"><img src="docs/fire.png" width="820" alt="The streak fire, from out to prism fire at a year"></p>
+<p align="center"><img src="docs/stats.png" width="560" alt="Stats: your rank, streak, history, the week on the record, badges and skins"></p>
 
 ## Install
 
