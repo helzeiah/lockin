@@ -3,8 +3,9 @@
 <h1 align="center">lockin</h1>
 
 <p align="center">
-  <b>Plan your day first thing. Hard-block everything else. Keep the streak.</b><br>
-  An accountability app for macOS that lives in the notch.
+  <b>Lock in on your day.</b><br>
+  Your plan shows up first thing, everything else stays blocked until the work's done,<br>
+  and your streak keeps you coming back. An accountability app for macOS that lives in the notch.
 </p>
 
 <p align="center">
