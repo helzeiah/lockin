@@ -4,7 +4,8 @@
 
 <p align="center">
   <b>Plan it. Lock in. Don't break the streak.</b><br>
-  Take control of your day before your Mac takes it from you.
+  Take control of your day before your Mac takes it from you.<br>
+  A macOS menu bar app that lives in your notch, like a Dynamic Island.
 </p>
 
 <p align="center">
@@ -14,10 +15,13 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-111"></a>
 </p>
 
-<p align="center"><img src="docs/morning.png" width="820" alt="The morning screen: today's plan, your streak, and a button to lock in"></p>
+<p align="center"><img src="docs/notch.png" width="820" alt="lockin in the notch and the menu bar: the session timer wraps around the notch like a Dynamic Island, and the menu shows the session"></p>
 
 ## What it does
 
+- **Lives in your notch and menu bar.** While you're locked in, the timer wraps around the notch like a Dynamic
+  Island. Hover it for the task, tap it for controls. Planned sessions, calendar asks, check-ins and results drop out
+  of it, and the menu bar has the rest. No notch? It sits at the top of the screen.
 - **Your day comes first.** The first time you use your Mac each day, your plan covers the screen. Lock in on the
   first session or start your day. Skipping takes a 3-second hold and a reason, and it goes on the record.
 - **Plan in one line.** Type `leetcode 45, essay intro 30 at 2pm` and lockin times it around your calendar, then edit
@@ -31,13 +35,13 @@
 - **Rank up by doing real work.** XP, seven ranks from Rookie to Legend, 16 badges, a streak fire that changes color the
   longer you keep it, and skins you unlock and equip. Only active minutes count, so idling or a mouse jiggler earns nothing.
 
+<p align="center"><img src="docs/island.png" width="820" alt="A planned session starting: a card drops out of the notch and starts it in 12 seconds unless you snooze it"></p>
+<p align="center"><img src="docs/morning.png" width="820" alt="The morning screen: today's plan, your streak, and a button to lock in"></p>
 <p align="center">
   <img src="docs/today.png" width="410" alt="Today: timed sessions with the apps each one allows">
   &nbsp;
   <img src="docs/cover.png" width="410" alt="The cover over a distracting site during a session">
 </p>
-<p align="center"><img src="docs/ranks.png" width="820" alt="Ranks from Locked In to Legend"></p>
-<p align="center"><img src="docs/fire.png" width="820" alt="The streak fire, from out to prism fire at a year"></p>
 <p align="center"><img src="docs/stats.png" width="560" alt="Stats: your rank, streak, history, the week on the record, badges and skins"></p>
 
 ## Install
