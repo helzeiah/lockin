@@ -136,7 +136,7 @@ struct EngineTests {
 
         // Rewards: only signed, active work earns XP; edited lines earn nothing.
         func signed(_ fields: [String: Any]) -> [String: Any] { var f = fields; f["sig"] = Integrity.sign(f); return f }
-        let ts = logTimestamp(Date().addingTimeInterval(-3600))
+        let ts = logTimestamp(Calendar.current.date(byAdding: .hour, value: 12, to: Stats.today)!)   // midday of today's plan day, whatever time the test runs
         let real = signed(["type": "block_end", "ts": ts, "task": "Essay", "planned_min": 50, "focused_min": 50, "active_min": 50,
                            "offline_min": 0, "completed": true])
         let idle = signed(["type": "block_end", "ts": ts, "task": "Fake", "planned_min": 60, "focused_min": 2, "active_min": 2,
