@@ -10,6 +10,7 @@ struct TasksView: View {
     @State private var hoverId: String?
     @State private var showDone = false
     @State private var questionsHidden = false
+    @State private var effort = 0                // difficulty for what you add next; 0 = not set
     @FocusState private var addFocused: Bool
 
     private var open: [ListTask] { TaskList.ranked(e.listTasks) }
@@ -61,16 +62,21 @@ struct TasksView: View {
                 TextField("Add a task: sell fridge due fri 30m", text: $text, axis: .vertical)
                     .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...6)
                     .focused($addFocused).onSubmit(add)
+                Picker("", selection: $effort) {
+                    Text("Difficulty").tag(0)
+                    ForEach(1...3, id: \.self) { Text(ListTask.effortNames[$0]!).tag($0) }
+                }
+                .labelsHidden().fixedSize().help("How hard it is to get into. Harder tasks get planned earlier in the day")
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.06)))
-            Text("\"due fri\", \"by 12/5\", \"30m\" and a leading * (star) work. Paste a list to add one task per line.")
+            Text("\"due fri\", \"by 12/5\", \"30m\", a leading * (star) and \"hard\" or \"easy\" at the end work. Paste a list to add one task per line.")
                 .font(.system(size: 11)).foregroundStyle(.tertiary).padding(.leading, 4)
         }
     }
 
     private func add() {
-        guard !e.addListTasks(text).isEmpty else { return }
+        guard !e.addListTasks(text, effort: effort == 0 ? nil : effort).isEmpty else { return }
         text = ""; questionsHidden = false; addFocused = true
     }
 
@@ -160,6 +166,7 @@ struct ListTaskRow: View {
                     HStack(spacing: 6) {
                         if !t.dueLabel().isEmpty { chip(t.dueLabel(), icon: "clock", tint: dueTint) }
                         if let m = t.minutes { chip(fmtMinutes(m), icon: "hourglass", tint: .secondary) }
+                        effortChip
                         if onToday { chip("On today's plan", icon: "sun.max", tint: Theme.accent) }
                     }
                 }
@@ -189,7 +196,22 @@ struct ListTaskRow: View {
         .animation(.easeOut(duration: 0.12), value: hoverId)
     }
 
-    private var chips: Bool { !t.dueLabel().isEmpty || t.minutes != nil || onToday }
+    private var chips: Bool { !t.dueLabel().isEmpty || t.minutes != nil || onToday || t.effort != nil || hover }
+
+    /// Its difficulty, click to change (only on hover while it isn't set).
+    @ViewBuilder private var effortChip: some View {
+        if t.effort != nil || hover {
+            Menu {
+                ForEach(1...3, id: \.self) { n in Button(ListTask.effortNames[n]!) { e.updateListTask(t.id) { $0.effort = n } } }
+                if t.effort != nil { Divider(); Button("Not set") { e.updateListTask(t.id) { $0.effort = nil } } }
+            } label: {
+                chip(t.effort.flatMap { ListTask.effortNames[$0] } ?? "Difficulty", icon: "flame",
+                     tint: t.effort == 3 ? Theme.flame : t.effort == nil ? Color.secondary.opacity(0.6) : .secondary)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("How hard it is to get into. Harder tasks get planned earlier in the day")
+        }
+    }
     private var dueTint: Color {
         guard let n = t.daysLeft() else { return .secondary }
         return n < 0 ? Theme.danger : n <= 1 ? Theme.flame : .secondary
@@ -216,6 +238,7 @@ struct ListTaskEditor: View {
     @State private var due = Date()
     @State private var minutes = 0
     @State private var firstStep = ""
+    @State private var effort = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -227,6 +250,11 @@ struct ListTaskEditor: View {
                 Picker("Length", selection: $minutes) {
                     Text("Not sure").tag(0)
                     ForEach([15, 30, 45, 60, 90, 120, 180, 240], id: \.self) { Text(fmtMinutes($0)).tag($0) }
+                }
+                .frame(width: 170)
+                Picker("Difficulty", selection: $effort) {
+                    Text("Not set").tag(0)
+                    ForEach(1...3, id: \.self) { Text(ListTask.effortNames[$0]!).tag($0) }
                 }
                 .frame(width: 170)
             }
@@ -244,7 +272,7 @@ struct ListTaskEditor: View {
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
         .onAppear {
             title = t.title; notes = t.notes ?? ""; hasDue = t.dueDate != nil; due = t.dueDate ?? Stats.today
-            minutes = t.minutes ?? 0; firstStep = t.first_step ?? ""
+            minutes = t.minutes ?? 0; firstStep = t.first_step ?? ""; effort = t.effort ?? 0
         }
     }
 
@@ -256,6 +284,7 @@ struct ListTaskEditor: View {
             x.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
             x.due = hasDue ? DateFormatter.ymd.string(from: due) : (x.due == nil ? nil : "")
             x.minutes = minutes > 0 ? minutes : x.minutes
+            x.effort = effort > 0 ? effort : nil
             let step = firstStep.trimmingCharacters(in: .whitespaces)
             x.first_step = step.isEmpty ? x.first_step : step
         }

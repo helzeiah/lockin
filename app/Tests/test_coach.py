@@ -205,6 +205,23 @@ class PromptAndApply(unittest.TestCase):
         with self.assertRaises(Exception):
             self.coach.questions_context("nope")
 
+    def test_the_day_level_and_hardest_first_reach_the_planner(self):
+        doc = json.loads((Path(self.tmp.name) / "todos.json").read_text())
+        doc["shape"] = {"breaks": [], "level": "small"}
+        (Path(self.tmp.name) / "todos.json").write_text(json.dumps(doc))
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Pset", "effort": 3}]}))
+        p = self.coach.plan_context("plan my day", "today")["prompt"]
+        self.assertIn("COMMITMENT TODAY", p)
+        self.assertIn("5-10 minute steps", p)
+        self.assertIn("hardest first", p)
+        self.assertIn('"difficulty": "hard"', p)
+
+    def test_steps_prompt_is_about_the_task(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Econ final study", "minutes": 60}]}))
+        p = self.coach.steps_context("t1")["prompt"]
+        self.assertIn("Econ final study", p)
+        self.assertIn("about 60 minutes", p)
+
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")
         with self.assertRaises(Exception):

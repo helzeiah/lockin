@@ -22,9 +22,10 @@ extension Engine {
         listTasks = list.tasks
     }
 
-    /// Adds what you typed or pasted (see TaskList.parse), newest on top. Returns the new tasks.
-    @discardableResult func addListTasks(_ text: String) -> [ListTask] {
-        let new = TaskList.parse(text)
+    /// Adds what you typed or pasted (see TaskList.parse), newest on top, with `effort` where you didn't type one.
+    /// Returns the new tasks.
+    @discardableResult func addListTasks(_ text: String, effort: Int? = nil) -> [ListTask] {
+        let new = TaskList.parse(text).map { t in var t = t; t.effort = t.effort ?? effort; return t }
         if !new.isEmpty { editList { $0.insert(contentsOf: new, at: 0) } }
         return new
     }
@@ -42,30 +43,75 @@ extension Engine {
         for t in todos + tomorrow where t.task_id == id && t.isDone != done { setDone(t.id, done) }
     }
 
-    /// Puts list tasks on a day's plan, in the order given. Today they get the soonest open times; their apps come
-    /// from their words, the same as anything you type in.
+    /// Puts list tasks on a day's plan, then arranges the day (see arrangeDay). Their apps come from their words, the
+    /// same as anything you type in. On a small day with the AI planner on, the AI breaks each one into named steps.
     func planFromList(_ tasks: [ListTask], day: PlanDay) {
         let fresh = tasks.filter { t in !t.isDone && !list(day).contains { $0.task_id == t.id } }
         guard !fresh.isEmpty else { return }
-        let cfg = self.cfg
+        let cfg = self.cfg, level = shape(day)?.level
         planning = true
-        DispatchQueue.global(qos: .userInitiated).async {
+        Task.detached(priority: .userInitiated) {
             let history = TaskMatch.history()
+            var added: [Todo] = []
             for t in fresh {
-                let minutes = t.minutes ?? 45
-                let start = day == .today ? soonestSlot(minutes: minutes) : ""
                 let match = TaskMatch.apps(for: t.title, cfg: cfg, history: history)
-                DispatchQueue.main.sync {
-                    var d = TodoDoc.load()
-                    d.edit(day) { $0.append(Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: minutes, start: start,
-                                                 apps: match.apps, task_id: t.id)) }
-                    d.save(); self.reloadTodos()
-                }
+                let item = Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: t.minutes ?? 45, start: "",
+                                apps: match.apps, task_id: t.id, effort: t.effort)
+                var steps: [(task: String, minutes: Int)] = []
+                if level == .small, cfg.aiOn, item.minutes > Commitment.small.range.upperBound { steps = await Engine.aiSteps(t, cfg: cfg) }
+                added += level.map { TodoDoc.cut(item, $0, steps: steps, firstStep: t.first_step) } ?? [item]
             }
-            Task { @MainActor in
+            let pieces = added
+            await MainActor.run {
+                var d = TodoDoc.load()
+                d.edit(day) { $0 += pieces }
+                d.save(); self.reloadTodos()
+                self.arrangeDay(day)
                 self.planning = false
-                self.showPlanNote("Added \(fresh.count) from your to-do list" + (day == .tomorrow ? " to tomorrow" : ""))
+                self.showPlanNote("Added \(fresh.count) from your to-do list" + (day == .tomorrow ? " to tomorrow" : "")
+                                  + (pieces.count > fresh.count ? " in \(pieces.count) pieces" : ""))
             }
+        }
+    }
+
+    /// Builds a day around how much you can commit to: sessions cut to the day's level (`recut` also joins up pieces
+    /// you haven't started, for a new level), then the most time-sensitive, hardest and longest first while you're
+    /// fresh, easier ones as the day goes on. Today they're timed one after another from now, around your calendar,
+    /// breaks and finish time; times you set yourself and repeats stay put. Tomorrow's are just put in that order.
+    func arrangeDay(_ day: PlanDay, recut: Bool = false) {
+        var d = TodoDoc.load()
+        var list = d.list(day)
+        let keep = day == .today ? block?.todoId : nil
+        if let level = shape(day)?.level {
+            list = recut ? TodoDoc.recut(list, level, keep: keep)
+                         : list.flatMap { t in t.part == nil && !t.isDone && (t.spent ?? 0) == 0 && t.source == nil && t.id != keep
+                                                ? TodoDoc.cut(t, level, firstStep: listTasks.first { $0.id == t.task_id }?.first_step) : [t] }
+        }
+        let due = Dictionary(listTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let offset = day == .today ? 0 : 1
+        list = TodoDoc.prioritized(list) { t in t.task_id.flatMap { due[$0]?.daysLeft() }.map { $0 - offset } }
+        if day == .today, Calendar.current.isDate(Stats.day(of: Date()), inSameDayAs: Date()) {
+            let (now, busy, end) = bounds(.today)
+            list = TodoDoc.retimed(list, from: planAnchor, busy: busy, dayEnd: end, now: now, keep: keep, breakAfter: cfg.breakAfter, pack: true)
+        }
+        d.edit(day) { $0 = list }
+        d.save(); reloadTodos()
+    }
+
+    /// The AI's 5-10 minute steps for a list task, for a small day ([] if it can't).
+    nonisolated static func aiSteps(_ t: ListTask, cfg: Config) async -> [(task: String, minutes: Int)] {
+        var items: [[String: Any]] = []
+        if cfg.ai?.provider == "apple" {   // Apple Intelligence runs in the app; the helper writes the prompt
+            let p = (try? JSONSerialization.jsonObject(with: Data(runCoach(["sprompt", t.id]).utf8))) as? [String: Any]
+            guard let prompt = p?["prompt"] as? String, let answer = try? await AppleAI.plan(prompt: prompt) else { return [] }
+            items = ((try? JSONSerialization.jsonObject(with: Data(answer.utf8))) as? [String: Any])?["items"] as? [[String: Any]] ?? []
+        } else {
+            items = ((try? JSONSerialization.jsonObject(with: Data(runCoach(["steps", t.id]).utf8))) as? [String: Any])?["steps"] as? [[String: Any]] ?? []
+        }
+        return items.prefix(24).compactMap { s in
+            let name = String((s["task"] as? String ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(120))
+            let m = (s["minutes"] as? Int) ?? Int(s["minutes"] as? Double ?? 10)
+            return name.isEmpty ? nil : (name, min(max(m, 5), 15))
         }
     }
 

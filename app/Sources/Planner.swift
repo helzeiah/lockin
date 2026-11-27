@@ -754,6 +754,7 @@ struct DayShapeCard: View {
     @State private var breaks: [EditBreak] = []
     @State private var finish = Date()
     @State private var hasFinish = true
+    @State private var level: Commitment?
 
     struct EditBreak: Identifiable { let id = UUID(); var start: Date; var minutes: Int }
 
@@ -781,8 +782,26 @@ struct DayShapeCard: View {
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("When do you want a longer break, and when do you want to be done \(day == .today ? "today" : "tomorrow")?")
-                .font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            Text("How much can you commit to \(day == .today ? "today" : "tomorrow")?")
+                .font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 8) {
+                ForEach(Commitment.allCases, id: \.self) { c in
+                    Button { level = level == c ? nil : c } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(c.title).font(.system(size: 13, weight: .semibold))
+                            Text(c.blurb).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(level == c ? Theme.accent.opacity(0.18) : Color.primary.opacity(0.05)))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(level == c ? Theme.accent.opacity(0.7) : .clear))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Text("When do you want a longer break, and when do you want to be done?")
+                .font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
             ForEach($breaks) { $b in
                 HStack(spacing: 8) {
                     Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
@@ -823,12 +842,13 @@ struct DayShapeCard: View {
         let s = shape ?? DayShape.last ?? DayShape(breaks: [.init(start: "12:30", minutes: 60)], finish: "18:00")
         breaks = s.breaks.compactMap { b in parseHHMM(b.start, on: dayDate).map { EditBreak(start: $0, minutes: b.minutes) } }
         hasFinish = s.finish != nil
+        level = shape?.level   // asked fresh each day: how today feels isn't how yesterday did
         finish = parseHHMM(s.finish ?? "18:00", on: dayDate) ?? dayDate
     }
 
     private func save() {
         let list = breaks.sorted { $0.start < $1.start }.map { DayShape.Break(start: hhmm($0.start), minutes: $0.minutes) }
-        e.setShape(DayShape(breaks: list, finish: hasFinish ? hhmm(finish) : nil), day: day)
+        e.setShape(DayShape(breaks: list, finish: hasFinish ? hhmm(finish) : nil, level: level), day: day)
         editing = false
     }
 }

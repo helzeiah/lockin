@@ -5,6 +5,7 @@
     coach.py slot MINUTES [SKIP]  -> the soonest start (HH:MM) around the calendar and what's already planned (no AI)
     coach.py todos [today|tomorrow] -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI edits that day
     coach.py questions TASK_ID    -> up to 3 questions the AI would ask about a to-do list task, to plan it well
+    coach.py steps TASK_ID        -> a to-do list task broken into 5-10 minute steps, for a small-commitment day
     coach.py test                 -> checks the AI set up in Settings > AI planner
 Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 The app rolls the day over (tomorrow's plan becomes today's) before it calls this script, so this script never does.
@@ -90,6 +91,8 @@ def task_line(t):
         out["minutes"] = t["minutes"]
     if t.get("starred"):
         out["starred"] = True
+    if t.get("effort") in (1, 2, 3):
+        out["difficulty"] = {1: "easy", 2: "medium", 3: "hard"}[t["effort"]]
     notes = [t.get("notes") or "", ("First step: " + t["first_step"]) if t.get("first_step") else ""]
     notes += [f'{qa.get("q", "")} {qa.get("a", "")}' for qa in t.get("qa") or [] if isinstance(qa, dict)]
     notes = " · ".join(n for n in notes if n)
@@ -292,6 +295,13 @@ def plan_context(text, day="today"):
         except Exception:
             notes = ""
     which = f"tomorrow ({pdate:%A %B %d})" if tomorrow else "today"
+    level = shape.get("level")
+    sizes = {"small": "5-10", "medium": "25-45", "large": "60-90"}
+    level_rule = {
+        "small": "Starting feels hard today. Break every task into tiny, concrete 5-10 minute steps, each one simple enough to start without thinking (\"open the doc and write the first heading\"), one item per step.",
+        "medium": "A normal day. Sessions of 25-45 minutes; split longer tasks into pieces that size.",
+        "large": "They have room for deep work today. Long unbroken blocks of 60-90 minutes; split anything longer into blocks that size, and don't chop shorter work into small bits.",
+    }.get(level, "")
     breaks_rule = f"{break_after(cfgj, 30)} min after a 30-minute one, {break_after(cfgj, 90)} min after 90 minutes"
     prompt = f"""You are the day planner inside a focus app. About the user: {about}
 They talk to you about {which}; you return that day's whole updated plan plus a one-sentence reply.
@@ -308,8 +318,9 @@ How to update:
   the day, fill free time, or "what should I do", pull from it: overdue and due-soon first, then starred. Add one
   using its "L:" ref, its title as the task, and its minutes if it has them; use its notes to size and order it.
   For a narrow edit ("done X", "free at 8") leave the list alone.
-- One concrete action per item ("Write the intro section of the essay"). Chunks of 25-90 minutes.
-- Order unfinished items by urgency (hard deadlines first), then importance; make the first one easy to start.
+- One concrete action per item ("Write the intro section of the essay"). {("Chunks of " + sizes[level] + " minutes.") if level in sizes else "Chunks of 25-90 minutes."}
+{("- COMMITMENT TODAY: " + level_rule + chr(10)) if level_rule else ""}- Order unfinished items hardest first while they're fresh: most time-sensitive (overdue, due today, then tomorrow),
+  then the hardest (list "difficulty", else the longest), then the longest. Easier, lower-stress items go later in the day.
 - "why": at most 8 words.
 - SCHEDULE unfinished items: a 24h HH:MM "start", back to back with a break after each ({breaks_rule}), inside the free windows,
   never overlapping calendar events or their breaks{"" if tomorrow else ", never before now"}. Timing they state always wins.
@@ -366,6 +377,53 @@ def questions_from_ai(task_id):
     return [" ".join(str(q).split())[:160] for q in qs if str(q).strip()][:3]
 
 
+def steps_context(task_id):
+    """The prompt for breaking one to-do list task into 5-10 minute steps (a small-commitment day), and its schema.
+    The answer uses the planner's item shape so Apple Intelligence can reuse the planner's fixed structure."""
+    cfg = load_config()
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        tasks = []
+    t = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id), None)
+    if not t:
+        raise ai.AIError("that task isn't on the list")
+    total = int(t.get("minutes") or 45)
+    step = {"type": "object", "properties": {"ref": {"type": "string"}, "task": {"type": "string"}, "minutes": {"type": "integer"},
+            "start": {"type": "string"}, "done": {"type": "boolean"}, "why": {"type": "string"}},
+            "required": ["ref", "task", "minutes", "start", "done", "why"], "additionalProperties": False}
+    schema = {"type": "object", "properties": {"items": {"type": "array", "items": step}, "reply": {"type": "string"}},
+              "required": ["items", "reply"], "additionalProperties": False}
+    prompt = f"""Someone finds it hard to start anything today. Break this task from their to-do list into tiny steps they
+can do one at a time: each one concrete, physical and simple enough to start without thinking ("open the problem set
+PDF", "write 3 bullet points for the intro"), 5-10 minutes each, in the order they'd do them, about {total} minutes in all.
+Return them as items: ref "new", the step as task, its minutes, start "", done false, why "". reply: "ok".
+
+Task: {t.get("title", "")}
+What they've said about it: {json.dumps(task_line(t))}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def steps_from_ai(task_id):
+    ctx = steps_context(task_id)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    items = res.get("items") if isinstance(res, dict) else None
+    if not isinstance(items, list):
+        raise ai.AIError("the AI's answer wasn't a list of steps")
+    out = []
+    for it in items[:24]:
+        if not isinstance(it, dict):
+            continue
+        task = " ".join(str(it.get("task") or "").split())[:120]
+        try:
+            minutes = min(max(int(it.get("minutes") or 10), 5), 15)
+        except (TypeError, ValueError):
+            minutes = 10
+        if task:
+            out.append({"task": task, "minutes": minutes})
+    return out
+
+
 def todos_from_ai(text, day="today"):
     """Conversational planner: builds a day's plan from a dump, or edits it from a message like
     "finished the stats hw", "free at 8 now", "add laundry", "push the essay to tomorrow"."""
@@ -391,11 +449,13 @@ def apply_plan(ctx, text, res):
         used.add(it["id"])
         it["block"] = ""
         if old:   # what the app knows about an item survives a re-plan: time worked, its apps, its rule, repeat, list task
-            for k in ("spent", "apps", "block", "source", "ref", "task_id"):
+            for k in ("spent", "apps", "block", "source", "ref", "task_id", "effort", "group", "whole", "part", "parts"):
                 if old.get(k):
                     it[k] = old[k]
         elif ref in listed and ref not in used:   # pulled in from the to-do list
             it["task_id"] = listed[ref]["id"]
+            if listed[ref].get("effort") in (1, 2, 3):
+                it["effort"] = listed[ref]["effort"]
             used.add(ref)
         new_items.append(it)
     reply = " ".join(str(res.get("reply") or "Updated your plan.").split())[:200]
@@ -527,6 +587,12 @@ if __name__ == "__main__":
         try:
             tid = sys.argv[2] if len(sys.argv) > 2 else ""
             print(json.dumps({"questions": questions_from_ai(tid)} if cmd == "questions" else {"prompt": questions_context(tid)["prompt"]}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("steps", "sprompt"):   # sprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            tid = sys.argv[2] if len(sys.argv) > 2 else ""
+            print(json.dumps({"steps": steps_from_ai(tid)} if cmd == "steps" else {"prompt": steps_context(tid)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd == "slot":

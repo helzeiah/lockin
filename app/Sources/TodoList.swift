@@ -17,8 +17,10 @@ struct ListTask: Codable, Identifiable, Hashable {
     var qa: [QA]? = []               // your answers to the AI's questions about it
     var ai_questions: [String]? = nil   // the AI's questions still waiting for an answer
     var skipped: Bool? = nil         // "Stop asking" about this one
+    var effort: Int? = nil           // how hard it is to get into: 1 easy, 2 medium, 3 hard; nil = judged by length
 
     var isDone: Bool { done != nil }
+    static let effortNames = [1: "Easy", 2: "Medium", 3: "Hard"]
     var isStarred: Bool { starred ?? false }
     var dueDate: Date? { due.flatMap { $0.isEmpty ? nil : DateFormatter.ymd.date(from: $0) } }
 
@@ -144,6 +146,11 @@ enum TaskList {
             let hours = m.lowercased().contains("h")
             let minutes = Int((hours ? num * 60 : num).rounded())
             if (5...600).contains(minutes) { t.minutes = minutes; s.replaceSubrange(r, with: " ") }
+        }
+        // How hard: "easy", "medium" or "hard" as the last word.
+        if let r = s.range(of: #"(?i)\s(easy|medium|hard)\s*$"#, options: .regularExpression) {
+            t.effort = ["easy": 1, "medium": 2, "hard": 3][String(s[r]).trimmingCharacters(in: .whitespaces).lowercased()]
+            s.replaceSubrange(r, with: " ")
         }
         // A due date: "due fri", "by tomorrow", "due 12/5", "by dec 5".
         if let r = s.range(of: #"(?i)\s(due|by)\s+(today|tonight|tomorrow|tmrw|next week|mon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?|\d{1,2}/\d{1,2}|(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2})(?=\s)"#,

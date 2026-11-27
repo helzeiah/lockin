@@ -319,6 +319,56 @@ struct EngineTests {
             e.stopBlock(completed: false, silent: true); e.card = nil
         }
 
+        // Commitment levels cut tasks to size; the day runs hardest and most urgent first.
+        do {
+            check(Commitment.small.pieces(45) == [10, 10, 10, 10, 5], "small: \(Commitment.small.pieces(45))")
+            check(Commitment.medium.pieces(120) == [40, 40, 40] && Commitment.medium.pieces(40) == [40], "medium: \(Commitment.medium.pieces(120))")
+            check(Commitment.large.pieces(120) == [60, 60] && Commitment.large.pieces(200) == [65, 65, 70], "large: \(Commitment.large.pieces(200))")
+            for m in [7, 23, 45, 61, 95, 137, 240] { for c in Commitment.allCases {
+                let p = c.pieces(m)
+                check(p.reduce(0, +) == m && p.allSatisfy { $0 <= c.range.upperBound }, "\(c) \(m) adds up and fits: \(p)")
+            } }
+
+            let essay = Todo(id: "e", task: "Essay", minutes: 30, start: "")
+            let small = TodoDoc.cut(essay, .small, firstStep: "open the doc")
+            check(small.map(\.task) == ["Essay: open the doc", "Essay (2/3)", "Essay (3/3)"] && small.map(\.minutes) == [10, 10, 10]
+                  && Set(small.compactMap(\.group)) == ["e"] && small[0].id == "e", "small pieces: \(small.map(\.task))")
+            let named = TodoDoc.cut(essay, .small, steps: [("Open the doc", 5), ("Write the first heading", 10)])
+            check(named.map(\.task) == ["Open the doc", "Write the first heading"] && named.map(\.minutes) == [5, 10], "AI steps name the pieces")
+
+            // A new level joins up the pieces you haven't started and cuts again; a started piece stays.
+            var day = small; day[0].done = true
+            let large = TodoDoc.recut(day, .large)
+            check(large.count == 2 && large[0].isDone && large[1].task == "Essay" && large[1].minutes == 20, "recut joins unstarted pieces: \(large.map(\.task))")
+            check(TodoDoc.recut(TodoDoc.cut(Todo(id: "x", task: "X", minutes: 120, start: ""), .small), .large).map(\.minutes) == [60, 60], "small → large")
+
+            // Order: due first, then hard, then long; pieces stay together and in order.
+            let plan = [Todo(id: "easy", task: "easy", minutes: 20, start: "", effort: 1),
+                        Todo(id: "long", task: "long", minutes: 90, start: ""),
+                        Todo(id: "hard", task: "hard", minutes: 20, start: "", effort: 3),
+                        Todo(id: "due", task: "due", minutes: 15, start: "", task_id: "L1", effort: 1)]
+            let order = TodoDoc.prioritized(plan) { $0.task_id == "L1" ? 0 : nil }.map(\.id)
+            check(order == ["due", "long", "hard", "easy"], "due, then hard (long counts as hard), then easy: \(order)")
+            let cutUp = TodoDoc.cut(Todo(id: "big", task: "big", minutes: 30, start: ""), .small) + [Todo(id: "mid", task: "mid", minutes: 20, start: "")]
+            check(TodoDoc.prioritized(cutUp) { _ in nil }.map(\.id).first == "big"
+                  && TodoDoc.prioritized(cutUp) { _ in nil }.compactMap(\.part) == [1, 2, 3], "a cut-up task sorts as a whole, pieces in order")
+
+            check(TaskList.parseLine("econ final study due fri 2h hard")?.effort == 3
+                  && TaskList.parseLine("econ final study due fri 2h hard")?.title == "econ final study", "\"hard\" at the end sets difficulty")
+            check(TaskList.parseLine("leetcode mediums")?.effort == nil, "only a last word sets difficulty")
+
+            // Planning tomorrow on a small day: the list task arrives in pieces, hardest first.
+            try! json(["date": today(), "items": [], "tomorrow": [["id": "t1", "task": "Light reading", "minutes": 20, "effort": 1]],
+                       "tomorrow_shape": ["breaks": [], "level": "small"]]).write(to: Paths.todos)
+            TaskListDoc(tasks: [ListTask(id: "L9", title: "Problem set", minutes: 30, first_step: "print it", effort: 3)]).save()
+            e.reloadTodos()
+            e.arrangeDay(.tomorrow)
+            check(e.tomorrow.map(\.task) == ["Light reading (1/2)", "Light reading (2/2)"], "arrangeDay cuts to the level: \(e.tomorrow.map(\.task))")
+            try! json(["date": today(), "items": []]).write(to: Paths.todos)
+            try? FileManager.default.removeItem(at: Paths.tasks)
+            e.reloadTodos()
+        }
+
         // Setting a time yourself pins it; the plan doesn't pin times it picks.
         e.addTodo(task: "Pin me", minutes: 30, start: "")
         if let t = e.todos.first(where: { $0.task == "Pin me" }) {

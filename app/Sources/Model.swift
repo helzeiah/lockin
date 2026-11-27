@@ -174,6 +174,12 @@ struct Todo: Codable, Identifiable, Hashable {
     var ref: String? = nil           // the routine's id or the calendar event's id
     var pinned: Bool? = nil          // a time you set yourself: the plan flows around it until it goes by
     var task_id: String? = nil       // the to-do list task it came from
+    var effort: Int? = nil           // how hard it is to get into: 1 easy, 2 medium, 3 hard (from the to-do list)
+    // A piece of a bigger task, cut up for the day's commitment level: shared group, the task's name, which piece.
+    var group: String? = nil
+    var whole: String? = nil
+    var part: Int? = nil
+    var parts: Int? = nil
     var isDone: Bool { done ?? false }
     var left: Int { max(1, minutes - (spent ?? 0)) }
     var isRoutine: Bool { source == "routine" }
@@ -181,10 +187,10 @@ struct Todo: Codable, Identifiable, Hashable {
     static func newId() -> String { String(UUID().uuidString.prefix(8)).lowercased() }
 
     init(id: String, task: String, block: String = "", minutes: Int, start: String? = "", done: Bool? = false, why: String? = "",
-         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil, pinned: Bool? = nil, task_id: String? = nil) {
+         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil, pinned: Bool? = nil, task_id: String? = nil, effort: Int? = nil) {
         self.id = id; self.task = task; self.block = block; self.minutes = minutes; self.start = start; self.done = done
         self.why = why; self.from = from; self.spent = spent; self.apps = apps; self.source = source; self.ref = ref
-        self.pinned = pinned; self.task_id = task_id
+        self.pinned = pinned; self.task_id = task_id; self.effort = effort
     }
 
     /// Tolerant: only id, task and minutes have to be there (the helper script and older versions write fewer fields).
@@ -204,6 +210,11 @@ struct Todo: Codable, Identifiable, Hashable {
         ref = try? c.decodeIfPresent(String.self, forKey: .ref)
         pinned = try? c.decodeIfPresent(Bool.self, forKey: .pinned)
         task_id = try? c.decodeIfPresent(String.self, forKey: .task_id)
+        effort = try? c.decodeIfPresent(Int.self, forKey: .effort)
+        group = try? c.decodeIfPresent(String.self, forKey: .group)
+        whole = try? c.decodeIfPresent(String.self, forKey: .whole)
+        part = try? c.decodeIfPresent(Int.self, forKey: .part)
+        parts = try? c.decodeIfPresent(Int.self, forKey: .parts)
     }
 }
 
@@ -215,6 +226,7 @@ struct DayShape: Codable, Hashable {
     struct Break: Codable, Hashable { var start: String; var minutes: Int }   // "HH:MM"
     var breaks: [Break] = []
     var finish: String? = nil        // "HH:MM"; nil = the day_end setting
+    var level: Commitment? = nil     // how much you can commit to that day; nil = you didn't say (sessions stay as planned)
 
     /// The breaks as (start, end) on `day`.
     func busy(on day: Date) -> [(Date, Date)] {
@@ -223,7 +235,8 @@ struct DayShape: Codable, Hashable {
     /// "Lunch 12:30 PM for 1 hr · done by 6:00 PM", for the summary line.
     var summary: String {
         let br = breaks.map { "\(clockLabel($0.start)) for \(fmtMinutes($0.minutes))" }
-        let parts = (br.isEmpty ? ["No long break"] : ["Break " + br.joined(separator: ", ")]) + (finish.map { ["done by \(clockLabel($0))"] } ?? [])
+        let parts = (level.map { ["\($0.title) commitment"] } ?? []) + (br.isEmpty ? ["No long break"] : ["Break " + br.joined(separator: ", ")])
+            + (finish.map { ["done by \(clockLabel($0))"] } ?? [])
         return parts.joined(separator: " · ")
     }
 
@@ -333,7 +346,7 @@ struct TodoDoc: Codable {
     /// session) and to-dos without a time aren't touched.
     static func retimed(_ items: [Todo], from: Date, busy: [(Date, Date)], dayEnd: Date, now: Date = Date(),
                         freed: (start: Date, end: Date)? = nil, keep: String? = nil, last: String? = nil,
-                        breakAfter: (Int) -> Int = { _ in 5 }) -> [Todo] {
+                        breakAfter: (Int) -> Int = { _ in 5 }, pack: Bool = false) -> [Todo] {
         func at(_ t: Todo) -> Date? { parseHHMM(t.start ?? "", on: now) }
         func roundUp(_ d: Date) -> Date { Date(timeIntervalSince1970: (d.timeIntervalSince1970 / 300).rounded(.up) * 300) }
         func fixed(_ t: Todo) -> Bool { t.source != nil || ((t.pinned ?? false) && (at(t).map { $0 >= now } ?? false)) }
@@ -341,12 +354,14 @@ struct TodoDoc: Codable {
         for t in items where !t.isDone && t.id != keep && fixed(t) {
             if let a = at(t) { taken.append((a, a.addingTimeInterval(Double(t.left + breakAfter(t.left)) * 60))) }
         }
-        var queue = items.indices.filter { !items[$0].isDone && items[$0].id != keep && !fixed(items[$0]) && at(items[$0]) != nil }
+        // Pieces of a cut-up task are timed even before they have a time; other untimed to-dos stay "any time".
+        var queue = items.indices.filter { !items[$0].isDone && items[$0].id != keep && !fixed(items[$0])
+                                           && (at(items[$0]) != nil || (pack && items[$0].part != nil)) }
         if let last, let i = queue.firstIndex(where: { items[$0].id == last }) { queue.append(queue.remove(at: i)) }
         var out = items, cursor = roundUp(from), pull = freed
         for i in queue {
-            let t = items[i], old = at(t)!, len = Double(t.left) * 60, gap = Double(breakAfter(t.left)) * 60
-            var s = max(old, cursor)
+            let t = items[i], old = at(t) ?? cursor, len = Double(t.left) * 60, gap = Double(breakAfter(t.left)) * 60
+            var s = pack ? cursor : max(old, cursor)   // pack: one after another in the order given, from `from`
             if let p = pull, t.id != last, old >= p.start {
                 if old <= p.end.addingTimeInterval(600) { s = cursor; pull = (old, old.addingTimeInterval(len + gap)) }
                 else { pull = nil }   // a real gap: everything after it stays where it is
@@ -358,7 +373,7 @@ struct TodoDoc: Codable {
             }
             if s.addingTimeInterval(len) > dayEnd { out[i].start = ""; out[i].pinned = nil; continue }
             if hhmm(s) != t.start { out[i].start = hhmm(s); out[i].pinned = nil }
-            cursor = s.addingTimeInterval(len + gap)
+            cursor = roundUp(s.addingTimeInterval(len + gap))   // starts stay on 5-minute marks whatever the break
         }
         return out
     }
@@ -439,7 +454,7 @@ func runCoach(_ args: [String], input: String? = nil) -> String {
                "HOME": home, "USER": user, "LOGNAME": user, "LANG": "en_US.UTF-8", "TERM": "xterm",
                "FOCUS_DATA": Paths.dir.path, "FOCUS_CALEVENTS": Paths.calevents.path, "FOCUS_TODAY": today(),
                "PYTHONDONTWRITEBYTECODE": "1"]   // never write __pycache__ into the signed app bundle
-    if ["todos", "test", "questions"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
+    if ["todos", "test", "questions", "steps"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
     p.environment = env
     let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
     let inp = Pipe(); p.standardInput = inp

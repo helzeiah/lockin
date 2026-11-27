@@ -241,7 +241,7 @@ final class Engine: ObservableObject {
                     self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule, pinned: p.start != nil)
                 }
             }
-            Task { @MainActor in self.planning = false }
+            Task { @MainActor in self.planning = false; if day == .today { self.arrangeDay(.today) } }
         }
     }
 
@@ -323,12 +323,9 @@ final class Engine: ObservableObject {
     /// and your breaks, ending by your finish time. Returns how many moved. Today not between midnight and 4am, when
     /// the clock and the plan day disagree. Tomorrow's sessions only move out of the way of its breaks and finish time.
     @discardableResult func shiftPlan(from: Date, freed: (start: Date, end: Date)? = nil, last: String? = nil, day: PlanDay = .today) -> Int {
-        let now = day == .today ? Date() : tomorrowDate()
+        let (now, busy, end) = bounds(day)
         if day == .today { guard Calendar.current.isDate(Stats.day(of: now), inSameDayAs: now) else { return 0 } }
         var d = TodoDoc.load()
-        let shape = d.shape(day)
-        let busy = (day == .today ? events.filter { !$0.allDay }.map { ($0.start, $0.end) } : []) + (shape?.busy(on: now) ?? [])
-        let end = parseHHMM(shape?.finish ?? cfg.day_end ?? "23:30", on: now) ?? now
         let list = d.list(day)
         let new = TodoDoc.retimed(list, from: from, busy: busy, dayEnd: end, now: now, freed: freed,
                                   keep: day == .today ? block?.todoId : nil, last: last, breakAfter: cfg.breakAfter)
@@ -338,13 +335,29 @@ final class Engine: ObservableObject {
         return moved
     }
 
+    /// What a day's sessions fit around: its "now" (tomorrow: its start), calendar events and your breaks, and when
+    /// work stops (your finish time, else the day_end setting).
+    func bounds(_ day: PlanDay) -> (now: Date, busy: [(Date, Date)], end: Date) {
+        let now = day == .today ? Date() : tomorrowDate()
+        let shape = day == .today ? todayShape : tomorrowShape
+        let busy = (day == .today ? events.filter { !$0.allDay }.map { ($0.start, $0.end) } : []) + (shape?.busy(on: now) ?? [])
+        return (now, busy, parseHHMM(shape?.finish ?? cfg.day_end ?? "23:30", on: now) ?? now)
+    }
+
     /// Your answer to "when are your breaks, and when do you finish?" for a day: saved with the plan, remembered as the
     /// starting point next time, and the plan moves to fit it.
     func setShape(_ shape: DayShape, day: PlanDay) {
         var d = TodoDoc.load()
         if day == .today { d.shape = shape } else { d.tomorrow_shape = shape }
+        let before = day == .today ? todayShape : tomorrowShape
         d.save(); reloadTodos()
         DayShape.last = shape
+        if shape.level != before?.level {   // a new commitment level: the day is re-cut and re-ordered for it
+            arrangeDay(day, recut: true)
+            appendLog(["type": "day_shape", "day": day.rawValue, "level": shape.level?.rawValue ?? ""])
+            showPlanNote("Planned for a \(shape.level?.title.lowercased() ?? "usual") day: \(shape.level?.blurb.lowercased() ?? "sessions as planned"), hardest first")
+            return
+        }
         let timed = Set(list(day).filter { !$0.isDone && !($0.start ?? "").isEmpty }.map(\.id))
         let n = shiftPlan(from: day == .today ? planAnchor : tomorrowDate(), day: day)
         let dropped = list(day).filter { timed.contains($0.id) && ($0.start ?? "").isEmpty }.count
