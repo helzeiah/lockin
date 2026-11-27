@@ -227,7 +227,7 @@ final class Engine: ObservableObject {
                 let start = p.start ?? (day == .today ? soonestSlot(minutes: minutes) : "")
                 let match = TaskMatch.apps(for: p.task, cfg: cfg, history: history)
                 DispatchQueue.main.sync {
-                    self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule)
+                    self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule, pinned: p.start != nil)
                 }
             }
             Task { @MainActor in self.planning = false }
@@ -308,26 +308,55 @@ final class Engine: ObservableObject {
         return n
     }
 
-    func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil) {
+    /// The plan follows the day (see TodoDoc.retimed): today's open sessions re-timed from `from` around the calendar.
+    /// Returns how many moved. Not between midnight and 4am, when the clock and the plan day disagree.
+    @discardableResult func shiftPlan(from: Date, freed: (start: Date, end: Date)? = nil, last: String? = nil) -> Int {
+        let now = Date()
+        guard Calendar.current.isDate(Stats.day(of: now), inSameDayAs: now) else { return 0 }
         var d = TodoDoc.load()
-        d.edit(day) { $0.append(Todo(id: Todo.newId(), task: task, block: rule ?? "", minutes: minutes, start: start, apps: apps)) }
+        let busy = events.filter { !$0.allDay }.map { ($0.start, $0.end) }
+        let end = parseHHMM(cfg.day_end ?? "23:30", on: now) ?? now
+        let new = TodoDoc.retimed(d.items, from: from, busy: busy, dayEnd: end, now: now, freed: freed, keep: block?.todoId, last: last)
+        let moved = zip(d.items, new).filter { $0.start != $1.start }.count
+        guard moved > 0 else { return 0 }
+        d.items = new; d.sortItems(); d.save(); reloadTodos()
+        return moved
+    }
+    /// When the next session can start: after the running one (and a break), else now.
+    var planAnchor: Date {
+        guard let b = block else { return Date() }
+        return Date(timeIntervalSince1970: b.ends + (b.kind == "focus" ? 300 : 0))
+    }
+    /// The slot a to-do on today's plan was set for.
+    func slot(of id: String) -> (start: Date, end: Date)? {
+        guard let t = todos.first(where: { $0.id == id }), let a = parseHHMM(t.start ?? "") else { return nil }
+        return (a, a.addingTimeInterval(Double(t.left) * 60))
+    }
+
+    func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil, pinned: Bool = false) {
+        var d = TodoDoc.load()
+        d.edit(day) { $0.append(Todo(id: Todo.newId(), task: task, block: rule ?? "", minutes: minutes, start: start, apps: apps,
+                                     pinned: pinned && !start.isEmpty ? true : nil)) }
         d.save(); reloadTodos()
     }
 
-    /// Edits a to-do wherever it is (today, tomorrow or the backlog). Only the fields passed change.
+    /// Edits a to-do wherever it is (today, tomorrow or the backlog). Only the fields passed change. A new time is one
+    /// you chose, so the plan flows around it (pinned) until it goes by.
     func updateTodo(_ id: String, task: String? = nil, start: String? = nil, minutes: Int? = nil, apps: [String]? = nil) {
         var d = TodoDoc.load()
         func apply(_ t: inout Todo) {
             if let task { t.task = task }
-            if let start { t.start = start }
+            if let start, start != t.start { t.start = start; t.pinned = start.isEmpty ? nil : true }
             if let minutes { t.minutes = minutes }
             if let apps { t.apps = apps }
         }
+        let onToday = d.items.contains { $0.id == id }
         if let i = d.items.firstIndex(where: { $0.id == id }) { apply(&d.items[i]) }
         else if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { apply(&d.tomorrow![i]) }
         else if let i = d.backlog?.firstIndex(where: { $0.id == id }) { apply(&d.backlog![i]) }
         else { return }
         d.sortItems(); d.save(); reloadTodos()
+        if onToday, start != nil || minutes != nil { shiftPlan(from: planAnchor) }   // anything it now overlaps moves out of the way
         if var b = self.block, b.todoId == id {      // edited while it's running
             if let task { b.task = task }
             if let apps { b.apps = apps }
@@ -421,6 +450,13 @@ final class Engine: ObservableObject {
         block?.activeSeconds = 0; block?.offlineSeconds = 0; block?.idleSeconds = 0; lastEval = nil
         appendLog(["type": "block_start", "name": block!.name, "minutes": m, "task": task ?? "", "apps": apps])
         persist()
+        if let todoId, todos.contains(where: { $0.id == todoId }) {   // started early or late: the rest of today moves to fit
+            let planned = slot(of: todoId)
+            var d = TodoDoc.load()
+            if let i = d.items.firstIndex(where: { $0.id == todoId }) { d.items[i].start = hhmm(Date()); d.items[i].pinned = nil; d.save() }
+            reloadTodos()
+            shiftPlan(from: planAnchor, freed: planned)
+        }
         if AppState.load().plan_shown != today() { passGate(how: "session") }   // starting work counts as starting the day
         let names = apps.prefix(3).joined(separator: ", ") + (apps.count > 3 ? " +\(apps.count - 3)" : "")
         show(Card(icon: "lock.fill", tint: "green", title: task ?? "Locked in",
@@ -477,8 +513,11 @@ final class Engine: ObservableObject {
         entry["sig"] = Integrity.sign(entry)
         appendLog(entry)
         if let id = b.todoId {
-            if completed { setDone(id, true) }
+            let ran = slot(of: id).map { (start: $0.start, end: Date(timeIntervalSince1970: b.ends)) }
+            if completed { setDone(id, true, shift: false) }
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
+            // The rest of today moves to fit, after a break; what's left of a session ended early goes after the others.
+            shiftPlan(from: Date().addingTimeInterval(300), freed: ran, last: completed ? nil : id)
         }
         let before = todayMinutes
         let st = stats()
@@ -930,11 +969,14 @@ final class Engine: ObservableObject {
 
     // MARK: to-dos
 
-    func setDone(_ id: String, _ done: Bool) {
+    /// Ticking off one of today's sessions moves the ones queued behind it up (`shift`).
+    func setDone(_ id: String, _ done: Bool, shift: Bool = true) {
+        let freed = done ? slot(of: id) : nil
         var d = TodoDoc.load()
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].done = done }
         if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { d.tomorrow![i].done = done }
         d.save(); reloadTodos()
+        if shift, let freed, block?.todoId != id { shiftPlan(from: planAnchor, freed: freed) }
     }
     func addSpent(_ id: String, _ minutes: Int) {
         guard minutes > 0 else { return }
@@ -1052,10 +1094,25 @@ final class Engine: ObservableObject {
         if minuteCount % 10 == 0 { refreshEvents() }
         if block?.kind == "focus" { persist() }
         todayMinutes = finishedToday()
-        morningCheck(); duePlanned(); dueEvents(); idleNudge()
+        catchUp(); morningCheck(); duePlanned(); dueEvents(); idleNudge()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
         if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }
+    }
+
+    /// A planned start went by without its session (away, asleep, auto-start off, another session ran long): the rest of
+    /// today slides to fit. Repeats and calendar sessions keep their time.
+    private func catchUp() {
+        let now = Date()
+        let missed = todos.contains { t in
+            guard !t.isDone, t.source == nil, t.id != block?.todoId, let s = parseHHMM(t.start ?? "") else { return false }
+            return now.timeIntervalSince(s) >= 120
+        }
+        guard missed else { return }
+        let n = shiftPlan(from: planAnchor)
+        if n > 0, let next = todos.first(where: { t in !t.isDone && t.id != block?.todoId && (parseHHMM(t.start ?? "").map { $0 >= now } ?? false) }) {
+            showFlash("Plan moved · \(next.task) at \(clockLabel(next.start))", icon: "clock.arrow.circlepath", tint: "blue")
+        }
     }
 
     /// A planned session's time came: a countdown in the notch, then it starts ("In 10 min" moves it).

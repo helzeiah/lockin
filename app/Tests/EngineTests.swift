@@ -172,6 +172,58 @@ struct EngineTests {
         e.card = nil
         UserDefaults.standard.removeObject(forKey: "rewardLevel")
 
+        // The plan follows the day: late starts push what's next, finishing early pulls the queue up to the first gap,
+        // and calendar events, repeats and times you set yourself stay put.
+        do {
+            let day = cal.date(bySettingHour: 9, minute: 0, second: 0, of: Date())!
+            func at(_ s: String) -> Date { parseHHMM(s, on: day)! }
+            func todo(_ id: String, _ start: String, _ min: Int, pinned: Bool? = nil, source: String? = nil) -> Todo {
+                Todo(id: id, task: id, minutes: min, start: start, source: source, pinned: pinned)
+            }
+            func starts(_ l: [Todo]) -> [String] { l.map { $0.start ?? "" } }
+            let end = at("23:30")
+            let plan = [todo("a", "09:00", 45), todo("b", "09:50", 30), todo("c", "14:00", 60)]
+
+            // Started 20 minutes late: b moves back, c's gap absorbs it.
+            var r = TodoDoc.retimed(plan, from: at("10:05"), busy: [], dayEnd: end, now: at("09:20"), keep: "a")
+            check(starts(r) == ["09:00", "10:05", "14:00"], "late start pushes the next one only: \(starts(r))")
+
+            // Finished a at 9:30 instead of 9:45: b (right behind it) moves up, c (after a real gap) stays.
+            var finished = plan; finished[0].done = true
+            r = TodoDoc.retimed(finished, from: at("09:35"), busy: [], dayEnd: end, now: at("09:30"), freed: (at("09:00"), at("09:45")))
+            check(starts(r) == ["09:00", "09:35", "14:00"], "finishing early pulls the queue up to the first gap: \(starts(r))")
+
+            // A calendar event sits in the way: the session goes after it.
+            r = TodoDoc.retimed(plan, from: at("10:05"), busy: [(at("10:00"), at("11:00"))], dayEnd: end, now: at("09:20"), keep: "a")
+            check(starts(r)[1] == "11:00", "flows around calendar events: \(starts(r))")
+
+            // Missed starts slide to now; a repeat and a pinned time ahead keep their time, and the rest flows around them.
+            let busy = [todo("a", "08:00", 30), todo("r", "09:30", 30, source: "routine"), todo("p", "10:15", 30, pinned: true), todo("b", "08:40", 60)]
+            r = TodoDoc.retimed(busy, from: at("09:00"), busy: [], dayEnd: end, now: at("09:00"))
+            check(starts(r) == ["09:00", "09:30", "10:15", "10:50"], "missed sessions slide around fixed ones: \(starts(r))")
+
+            // A pinned time that already went by moves like any other.
+            r = TodoDoc.retimed([todo("p", "08:00", 30, pinned: true)], from: at("09:00"), busy: [], dayEnd: end, now: at("09:00"))
+            check(r[0].start == "09:00" && r[0].pinned == nil, "a missed pinned time slides and unpins")
+
+            // Ended a early: what's left of it goes after the others.
+            r = TodoDoc.retimed(plan, from: at("09:25"), busy: [], dayEnd: end, now: at("09:20"), freed: (at("09:00"), at("09:45")), last: "a")
+            check(starts(r) == ["15:05", "09:25", "14:00"], "an unfinished session goes to the back: \(starts(r))")
+
+            // Nothing fits before the end of the day: it loses its time; done and untimed ones aren't touched.
+            r = TodoDoc.retimed([todo("x", "09:00", 60), Todo(id: "d", task: "d", minutes: 30, start: "08:00", done: true), todo("u", "", 30)],
+                                from: at("09:00"), busy: [], dayEnd: at("09:30"), now: at("09:00"))
+            check(starts(r) == ["", "08:00", ""], "overflow loses its time; done and untimed stay: \(starts(r))")
+        }
+
+        // Setting a time yourself pins it; the plan doesn't pin times it picks.
+        e.addTodo(task: "Pin me", minutes: 30, start: "")
+        if let t = e.todos.first(where: { $0.task == "Pin me" }) {
+            e.updateTodo(t.id, start: "23:00")
+            check(TodoDoc.load().items.first { $0.id == t.id }?.pinned == true, "a time you set is pinned")
+            e.deleteTodo(t.id)
+        } else { check(false, "added a to-do") }
+
         if failures == 0 { print("Engine: all tests passed") } else { print("Engine: \(failures) failed"); exit(1) }
     }
 }

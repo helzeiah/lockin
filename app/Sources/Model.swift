@@ -130,6 +130,7 @@ struct Config: Codable {
     var auto_start: Bool? = true         // planned sessions start at their time after a short countdown
     var calendar_mode: String? = "ask"   // "ask": offer to lock in when an event starts | "off"
     var calendar_ignore: [String]? = []  // event titles never asked about
+    var day_end: String? = "23:30"       // planned sessions that don't fit before this lose their time
     var routines: [Routine]? = []
 
     var aiOn: Bool { !["", "none"].contains(ai?.provider ?? "none") }
@@ -162,6 +163,7 @@ struct Todo: Codable, Identifiable, Hashable {
     var apps: [String]? = nil        // the apps this session allows; nil = decided when it starts
     var source: String? = nil        // "routine" (repeats) or "calendar"
     var ref: String? = nil           // the routine's id or the calendar event's id
+    var pinned: Bool? = nil          // a time you set yourself: the plan flows around it until it goes by
     var isDone: Bool { done ?? false }
     var left: Int { max(1, minutes - (spent ?? 0)) }
     var isRoutine: Bool { source == "routine" }
@@ -169,9 +171,10 @@ struct Todo: Codable, Identifiable, Hashable {
     static func newId() -> String { String(UUID().uuidString.prefix(8)).lowercased() }
 
     init(id: String, task: String, block: String = "", minutes: Int, start: String? = "", done: Bool? = false, why: String? = "",
-         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil) {
+         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil, pinned: Bool? = nil) {
         self.id = id; self.task = task; self.block = block; self.minutes = minutes; self.start = start; self.done = done
         self.why = why; self.from = from; self.spent = spent; self.apps = apps; self.source = source; self.ref = ref
+        self.pinned = pinned
     }
 
     /// Tolerant: only id, task and minutes have to be there (the helper script and older versions write fewer fields).
@@ -189,6 +192,7 @@ struct Todo: Codable, Identifiable, Hashable {
         apps = try? c.decodeIfPresent([String].self, forKey: .apps)
         source = try? c.decodeIfPresent(String.self, forKey: .source)
         ref = try? c.decodeIfPresent(String.self, forKey: .ref)
+        pinned = try? c.decodeIfPresent(Bool.self, forKey: .pinned)
     }
 }
 
@@ -276,6 +280,45 @@ struct TodoDoc: Codable {
         if day == .today { change(&items) } else { var t = tomorrow ?? []; change(&t); tomorrow = t }
         sortItems()
     }
+
+    /// The plan follows the day: today's open sessions re-timed in order, none before `from` (rounded up to 5 minutes),
+    /// with a 5-minute break after each and around `busy` (calendar events). Repeats, calendar sessions and times you
+    /// set yourself (while still ahead) keep their time and count as busy too. A session moves later only as far as it
+    /// has to, so gaps in the plan absorb a delay. `freed` is the slot a session that finished or started early was
+    /// planned for: the sessions queued right behind it move up, until the first real gap. `last` (a session ended
+    /// early) goes after the rest. Ones that no longer fit before `dayEnd` lose their time; `keep` (the running
+    /// session) and to-dos without a time aren't touched.
+    static func retimed(_ items: [Todo], from: Date, busy: [(Date, Date)], dayEnd: Date, now: Date = Date(),
+                        freed: (start: Date, end: Date)? = nil, keep: String? = nil, last: String? = nil) -> [Todo] {
+        func at(_ t: Todo) -> Date? { parseHHMM(t.start ?? "", on: now) }
+        func roundUp(_ d: Date) -> Date { Date(timeIntervalSince1970: (d.timeIntervalSince1970 / 300).rounded(.up) * 300) }
+        func fixed(_ t: Todo) -> Bool { t.source != nil || ((t.pinned ?? false) && (at(t).map { $0 >= now } ?? false)) }
+        var taken = busy
+        for t in items where !t.isDone && t.id != keep && fixed(t) {
+            if let a = at(t) { taken.append((a, a.addingTimeInterval(Double(t.left + 5) * 60))) }
+        }
+        var queue = items.indices.filter { !items[$0].isDone && items[$0].id != keep && !fixed(items[$0]) && at(items[$0]) != nil }
+        if let last, let i = queue.firstIndex(where: { items[$0].id == last }) { queue.append(queue.remove(at: i)) }
+        var out = items, cursor = roundUp(from), pull = freed
+        for i in queue {
+            let t = items[i], old = at(t)!, len = Double(t.left) * 60
+            var s = max(old, cursor)
+            if let p = pull, t.id != last, old >= p.start {
+                if old <= p.end.addingTimeInterval(600) { s = cursor; pull = (old, old.addingTimeInterval(len + 300)) }
+                else { pull = nil }   // a real gap: everything after it stays where it is
+            }
+            var clear = false
+            while !clear {
+                clear = true
+                for (a, b) in taken where s < b && s.addingTimeInterval(len) > a { s = roundUp(b); clear = false }
+            }
+            if s.addingTimeInterval(len) > dayEnd { out[i].start = ""; out[i].pinned = nil; continue }
+            if hhmm(s) != t.start { out[i].start = hhmm(s); out[i].pinned = nil }
+            cursor = s.addingTimeInterval(len + 300)
+        }
+        return out
+    }
+
     func save() {
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted]
         if let d = try? enc.encode(self) { try? d.write(to: Paths.todos) }
