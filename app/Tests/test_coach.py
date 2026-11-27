@@ -62,6 +62,23 @@ class Windows(unittest.TestCase):
         self.assertEqual([(a.strftime("%H:%M"), b.strftime("%H:%M")) for a, b in got],
                          [("09:05", "10:00"), ("11:00", "13:00"), ("14:00", "17:00")])
 
+    def test_break_times_skip_junk(self):
+        d = dt.date(2026, 11, 23)
+        got = self.coach.break_times({"breaks": [{"start": "12:30", "minutes": 45}, {"start": "noon"}, "x"]}, d)
+        self.assertEqual(got, [(dt.datetime(2026, 11, 23, 12, 30), dt.datetime(2026, 11, 23, 13, 15))])
+        self.assertEqual(self.coach.day_end_time({}, d, {"finish": "17:00"}), dt.datetime(2026, 11, 23, 17, 0))
+        self.assertEqual(self.coach.day_end_time({"day_end": "22:00"}, d, {}), dt.datetime(2026, 11, 23, 22, 0))
+
+    def test_breaks_scale_with_the_session(self):
+        self.assertEqual(self.coach.break_after({}, 25), 5)
+        self.assertEqual(self.coach.break_after({}, 90), 18)
+        self.assertEqual(self.coach.break_after({"break_ratio": 3}, 90), 30)
+        self.assertEqual(self.coach.break_after({"break_ratio": 0, "break_minutes": 7}, 90), 7)
+        self.assertEqual(self.coach.break_after({"break_minutes": 10}, 90), 10)   # an old config keeps its hand-set break
+        d = dt.date(2026, 11, 23)
+        busy = self.coach.busy_from([{"start": "09:00", "minutes": 90}], d, {"break_ratio": 3})
+        self.assertEqual(busy, [(dt.datetime(2026, 11, 23, 9, 0), dt.datetime(2026, 11, 23, 11, 0))])
+
     def test_short_gaps_are_dropped(self):
         d = dt.datetime(2026, 11, 23)
         busy = [(d.replace(hour=10, minute=10), d.replace(hour=12))]
@@ -158,6 +175,62 @@ class PromptAndApply(unittest.TestCase):
         self.assertEqual(gym["block"], "")
         saved = json.loads((Path(self.tmp.name) / "todos.json").read_text())
         self.assertEqual([t["task"] for t in saved["items"]], ["Essay", "Gym"])
+
+    def test_prompt_keeps_breaks_free_and_ends_at_the_finish(self):
+        doc = json.loads((Path(self.tmp.name) / "todos.json").read_text())
+        doc["shape"] = {"breaks": [{"start": "12:30", "minutes": 60}], "finish": "17:00"}
+        (Path(self.tmp.name) / "todos.json").write_text(json.dumps(doc))
+        p = self.coach.plan_context("plan my day", "today")["prompt"]
+        self.assertIn("Their longer breaks (keep free): 12:30-13:30", p)
+        self.assertIn("They finish work at 17:00", p)
+
+    def test_the_planner_sees_the_list_and_can_pull_from_it(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [
+            {"id": "t1", "title": "Sell fridge", "due": "2026-11-22", "minutes": 30, "first_step": "take photos"},
+            {"id": "t2", "title": "Done thing", "done": "2026-11-20"}]}))
+        ctx = self.coach.plan_context("plan my day", "today")
+        self.assertIn('"ref": "L:t1"', ctx["prompt"])
+        self.assertIn("First step: take photos", ctx["prompt"])
+        self.assertNotIn("Done thing", ctx["prompt"])
+        out = self.coach.apply_plan(ctx, "plan my day", {"items": [
+            {"ref": "a1", "task": "Essay", "minutes": 45, "start": "10:00", "done": False, "why": ""},
+            {"ref": "L:t1", "task": "Sell fridge", "minutes": 30, "start": "11:00", "done": False, "why": "overdue"}], "reply": "ok"})
+        fridge = out["items"][1]
+        self.assertEqual(fridge["task_id"], "t1")
+        self.assertNotEqual(fridge["id"], "L:t1")
+
+    def test_questions_prompt_is_about_the_task(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Policy memo for gened 1120"}]}))
+        self.assertIn("Policy memo for gened 1120", self.coach.questions_context("t1")["prompt"])
+        with self.assertRaises(Exception):
+            self.coach.questions_context("nope")
+
+    def test_the_day_level_and_hardest_first_reach_the_planner(self):
+        doc = json.loads((Path(self.tmp.name) / "todos.json").read_text())
+        doc["level"] = "small"
+        (Path(self.tmp.name) / "todos.json").write_text(json.dumps(doc))
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Pset", "effort": 3}]}))
+        p = self.coach.plan_context("plan my day", "today")["prompt"]
+        self.assertIn("COMMITMENT TODAY", p)
+        self.assertIn("5-10 minute steps", p)
+        self.assertIn("hardest first", p)
+        self.assertIn('"difficulty": "hard"', p)
+
+    def test_breakdown_prompt_is_about_the_task(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Econ final study", "minutes": 60}]}))
+        p = self.coach.breakdown_context("t1")["prompt"]
+        self.assertIn("Econ final study", p)
+        self.assertIn("covering ALL of it", p)
+        with self.assertRaises(Exception):
+            self.coach.breakdown_context("nope")
+
+    def test_tiny_prompt_is_about_the_task(self):
+        p = self.coach.tiny_context({"task": "Econ final study", "spent": 20, "steps": ["Open the slides"]})["prompt"]
+        self.assertIn("Econ final study", p)
+        self.assertIn("Open the slides", p)
+        self.assertIn("under 5 minutes", p)
+        with self.assertRaises(Exception):
+            self.coach.tiny_context({"task": "  "})
 
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")

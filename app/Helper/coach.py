@@ -4,6 +4,9 @@
     coach.py recap                -> today's focus and accountability record from log.jsonl
     coach.py slot MINUTES [SKIP]  -> the soonest start (HH:MM) around the calendar and what's already planned (no AI)
     coach.py todos [today|tomorrow] -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI edits that day
+    coach.py questions TASK_ID    -> up to 3 questions the AI would ask about a to-do list task, to plan it well
+    coach.py breakdown TASK_ID    -> a to-do list task broken into 5-15 minute steps covering all of it (realistic minutes)
+    coach.py tiny                 -> {"task", "details", "spent", "steps"} on stdin -> the one smallest next action (< 5 min)
     coach.py test                 -> checks the AI set up in Settings > AI planner
 Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 The app rolls the day over (tomorrow's plan becomes today's) before it calls this script, so this script never does.
@@ -28,6 +31,7 @@ DATA = Path(os.environ.get("FOCUS_DATA") or ROOT)
 LOG = DATA / "log.jsonl"
 TODOS = DATA / "todos.json"
 CONFIG = DATA / "config.json"
+TASKS = DATA / "tasks.json"     # the running to-do list (the app writes it; read-only here)
 DAY_STARTS_AT = 4          # a day runs 4am to 4am, the same as the app's stats
 
 
@@ -59,6 +63,43 @@ def load_doc():
 
 def load_todos():
     return load_doc()["items"]
+
+
+def load_tasks():
+    """The running to-do list, open tasks only, most urgent first (overdue, due today, starred, due soon, the rest)."""
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+    today = plan_date()
+
+    def key(t):
+        try:
+            n = (dt.date.fromisoformat(t["due"]) - today).days if t.get("due") else None
+        except ValueError:
+            n = None
+        tier = 0 if n is not None and n < 0 else 1 if n == 0 else 2 if t.get("starred") else 3 if n is not None and n <= 3 else 4
+        return (tier, n if n is not None else 10**6, t.get("created") or "")
+    return sorted([t for t in tasks if isinstance(t, dict) and not t.get("done") and t.get("id") and t.get("title")], key=key)
+
+
+def task_line(t):
+    """A list task for the AI: its ref, title, due date, length, star and what you've said about it."""
+    out = {"ref": "L:" + t["id"], "task": t["title"]}
+    if t.get("due"):
+        out["due"] = t["due"]
+    if t.get("minutes"):
+        out["minutes"] = t["minutes"]
+    if t.get("starred"):
+        out["starred"] = True
+    if t.get("effort") in (1, 2, 3):
+        out["difficulty"] = {1: "easy", 2: "medium", 3: "hard"}[t["effort"]]
+    notes = [t.get("notes") or "", ("First step: " + t["first_step"]) if t.get("first_step") else ""]
+    notes += [f'{qa.get("q", "")} {qa.get("a", "")}' for qa in t.get("qa") or [] if isinstance(qa, dict)]
+    notes = " · ".join(n for n in notes if n)
+    if notes:
+        out["notes"] = notes[:400]
+    return out
 
 
 def extras():
@@ -116,14 +157,53 @@ def free_windows(busy, start, day_end, min_minutes=20):
     return [(a, b) for a, b in out if (b - a).total_seconds() >= min_minutes * 60]
 
 
-def day_end_time(cfg, day=None):
-    eh, em = map(int, (cfg.get("day_end") or "23:30").split(":"))
+def day_end_time(cfg, day=None, shape=None):
+    """When work stops that day: the finish time you gave for it, else the day_end setting."""
+    end = (shape or {}).get("finish") or cfg.get("day_end") or "23:30"
+    try:
+        eh, em = map(int, end.split(":"))
+    except ValueError:
+        eh, em = 23, 30
     day = day or dt.date.today()
     return dt.datetime.combine(day, dt.time(eh, em))
 
 
-def busy_from(items, day):
-    """(start, end) of to-dos that already have a time, plus a 5 minute break after each."""
+def day_shape(doc, tomorrow=False):
+    """The breaks and finish time you gave for the day when you planned it ({} if you weren't asked yet)."""
+    s = doc.get("tomorrow_shape" if tomorrow else "shape")
+    return s if isinstance(s, dict) else {}
+
+
+def break_times(shape, day):
+    """Your longer breaks that day as (start, end), kept free like calendar events."""
+    out = []
+    for b in shape.get("breaks") or []:
+        try:
+            h, m = map(int, str(b.get("start", "")).split(":"))
+            a = dt.datetime.combine(day, dt.time(h, m))
+            out.append((a, a + dt.timedelta(minutes=int(b.get("minutes", 0)))))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return out
+
+
+def break_after(cfg, minutes):
+    """The break after a session this long: its length ÷ break_ratio (3-6), or the fixed break_minutes when that's 0.
+    Configs from before break_ratio keep a break length changed by hand (the same rule as the app)."""
+    fixed = int(cfg.get("break_minutes") or 5)
+    ratio = cfg.get("break_ratio")
+    if ratio is None:
+        ratio = 5 if fixed == 5 else 0
+    try:
+        ratio = int(ratio)
+    except (TypeError, ValueError):
+        ratio = 5
+    return max(1, round(minutes / ratio)) if ratio > 0 else max(1, fixed)
+
+
+def busy_from(items, day, cfg=None):
+    """(start, end) of to-dos that already have a time, plus the break after each."""
+    cfg = cfg if cfg is not None else load_config()
     out = []
     for t in items:
         if t.get("done") or len(t.get("start") or "") < 4:
@@ -134,7 +214,7 @@ def busy_from(items, day):
             continue
         a = dt.datetime.combine(day, dt.time(h, m))
         left = max(1, int(t.get("minutes", 30)) - int(t.get("spent", 0) or 0))
-        out.append((a, a + dt.timedelta(minutes=left + 5)))
+        out.append((a, a + dt.timedelta(minutes=left + break_after(cfg, left))))
     return out
 
 
@@ -143,9 +223,12 @@ def soonest_slot(minutes, skip=None):
     to-dos that already have a time. Returns "HH:MM", or "" if nothing fits today."""
     cfg = load_config()
     today = dt.date.today()
-    busy = [(a, b) for a, b, _ in calendar_events()] + busy_from([t for t in load_todos() if t.get("id") != skip], today)
+    doc = load_doc()
+    shape = day_shape(doc)
+    busy = ([(a, b) for a, b, _ in calendar_events()] + break_times(shape, today)
+            + busy_from([t for t in doc["items"] if t.get("id") != skip], today, cfg))
     need = dt.timedelta(minutes=minutes)
-    for a, b in free_windows(busy, dt.datetime.now(), day_end_time(cfg, today), min_minutes=minutes):
+    for a, b in free_windows(busy, dt.datetime.now(), day_end_time(cfg, today, shape), min_minutes=minutes):
         if b - a >= need:
             return f"{a:%H:%M}"
     return ""
@@ -180,16 +263,21 @@ def plan_context(text, day="today"):
     items = doc["tomorrow"] if tomorrow else doc["items"]
     chat = doc.get("chat", [])
     backlog = doc.get("backlog", [])
-    day_end = day_end_time(cfgj, pdate)
+    shape = day_shape(doc, tomorrow)
+    day_end = day_end_time(cfgj, pdate, shape)
     events = calendar_events(1 if tomorrow else 0)
+    breaks = break_times(shape, pdate)
     cal = "\n".join(f"- {a:%H:%M}-{b:%H:%M} {t}" for a, b, t in events) or "none"
+    brk = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in breaks) or "none"
     first_hour = (cfgj.get("active_hours") or [8, 23])[0]
     start_from = dt.datetime.combine(pdate, dt.time(first_hour)) if tomorrow else dt.datetime.now()
-    free = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free_windows([(a, b) for a, b, _ in events], start_from, day_end)) or "none left"
+    free = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free_windows([(a, b) for a, b, _ in events] + breaks, start_from, day_end)) or "none left"
     current = [{"ref": t["id"], "task": t["task"], "minutes": t["minutes"], "start": t.get("start", ""), "done": bool(t.get("done")),
                 "minutes_already_worked": t.get("spent", 0)} for t in items]
     history = "\n".join(f"{m['role']}: {m['text']}" for m in chat[-8:]) if not tomorrow else ""
     back = [{"ref": b["id"], "task": b["task"], "minutes": b["minutes"], "from": b.get("from")} for b in backlog]
+    planned = {t.get("task_id") for t in items if t.get("task_id")}
+    todo_list = [task_line(t) for t in load_tasks() if t["id"] not in planned][:30]
     item = {"type": "object", "properties": {
         "ref": {"type": "string", "description": "the existing item's ref, or \"new\""},
         "task": {"type": "string"}, "minutes": {"type": "integer"},
@@ -208,6 +296,14 @@ def plan_context(text, day="today"):
         except Exception:
             notes = ""
     which = f"tomorrow ({pdate:%A %B %d})" if tomorrow else "today"
+    level = doc.get("tomorrow_level" if tomorrow else "level")
+    sizes = {"small": "5-10", "medium": "25-45", "large": "60-90"}
+    level_rule = {
+        "small": "Starting feels hard today. Break every task into tiny, concrete 5-10 minute steps, each one simple enough to start without thinking (\"open the doc and write the first heading\"), one item per step.",
+        "medium": "A normal day. Sessions of 25-45 minutes; split longer tasks into pieces that size.",
+        "large": "They have room for deep work today. Long unbroken blocks of 60-90 minutes; split anything longer into blocks that size, and don't chop shorter work into small bits.",
+    }.get(level, "")
+    breaks_rule = f"{break_after(cfgj, 30)} min after a 30-minute one, {break_after(cfgj, 90)} min after 90 minutes"
     prompt = f"""You are the day planner inside a focus app. About the user: {about}
 They talk to you about {which}; you return that day's whole updated plan plus a one-sentence reply.
 
@@ -219,26 +315,149 @@ How to update:
 - "minutes" is an item's total length. If it has minutes_already_worked, only the rest still needs room in the schedule.
 - BACKLOG = unfinished items from earlier days. Do NOT add them on your own. Only if their message asks for one
   ("bring back X", "add my backlog") include it, using its backlog "ref".
-- One concrete action per item ("Write the intro section of the essay"). Chunks of 25-90 minutes.
-- Order unfinished items by urgency (hard deadlines first), then importance; make the first one easy to start.
+- TO-DO LIST = their running list of everything they need to do (refs start with "L:"). When they ask you to plan
+  the day, fill free time, or "what should I do", pull from it: overdue and due-soon first, then starred. Add one
+  using its "L:" ref, its title as the task, and its minutes if it has them; use its notes to size and order it.
+  For a narrow edit ("done X", "free at 8") leave the list alone.
+- One concrete action per item ("Write the intro section of the essay"). {("Chunks of " + sizes[level] + " minutes.") if level in sizes else "Chunks of 25-90 minutes."}
+{("- COMMITMENT TODAY: " + level_rule + chr(10)) if level_rule else ""}- Order unfinished items hardest first while they're fresh: most time-sensitive (overdue, due today, then tomorrow),
+  then the hardest (list "difficulty", else the longest), then the longest. Easier, lower-stress items go later in the day.
 - "why": at most 8 words.
-- SCHEDULE unfinished items: a 24h HH:MM "start", back to back with ~5 min breaks, inside the free windows,
-  never overlapping calendar events{"" if tomorrow else ", never before now"}. Timing they state always wins. If it doesn't
-  fit before {day_end:%H:%M}, start "" and why "doesn't fit".
+- SCHEDULE unfinished items: a 24h HH:MM "start", back to back with a break after each ({breaks_rule}), inside the free windows,
+  never overlapping calendar events or their breaks{"" if tomorrow else ", never before now"}. Timing they state always wins.
+  They finish work at {day_end:%H:%M}: nothing may run past it. If it doesn't fit, start "" and why "doesn't fit".
 - reply: plain and specific, e.g. "Marked stats homework done and moved everything after 8 PM." No fluff.
 
 Now: {dt.datetime.now():%A %B %d, %H:%M}. Planning {which}. The day ends around {day_end:%H:%M}.
 Calendar that day:
 {cal}
+Their longer breaks (keep free): {brk}
 Free windows: {free}
 {("Notes from their own tools:" + chr(10) + notes + chr(10)) if notes else ""}
 Current plan: {json.dumps(current)}
 Backlog (not part of the plan unless they ask): {json.dumps(back)}
+To-do list (not on the plan yet): {json.dumps(todo_list)}
 {("Earlier today: " + history) if history else ""}
 
 Their message:
 {text[:4000]}"""
     return {"cfg": cfgj, "prompt": prompt, "schema": schema, "doc": doc, "items": items, "backlog": backlog, "chat": chat, "tomorrow": tomorrow}
+
+
+def questions_context(task_id):
+    """The prompt for the AI's questions about one to-do list task, and the answer's schema."""
+    cfg = load_config()
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        tasks = []
+    t = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id), None)
+    if not t:
+        raise ai.AIError("that task isn't on the list")
+    about = (cfg.get("about_me") or "").strip() or "no details given"
+    schema = {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"},
+              "description": "0 to 3 short questions"}}, "required": ["questions"], "additionalProperties": False}
+    prompt = f"""You help someone plan a task from their to-do list inside a focus app. About them: {about}
+Ask at most 3 short questions whose answers would change how this task gets planned: what exactly is involved or
+how big it is, what it depends on or who it's waiting on, what "done" looks like, or a deadline detail that isn't clear.
+Don't ask what they've already said below. Don't ask when it's due or how long it takes unless it's still unclear.
+Each question under 15 words, plain and specific to this task. If the task is already clear, return no questions.
+
+Task: {t.get("title", "")}
+What they've said about it: {json.dumps(task_line(t))}
+Today: {plan_date():%A %B %d}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def questions_from_ai(task_id):
+    ctx = questions_context(task_id)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    qs = res.get("questions") if isinstance(res, dict) else None
+    if not isinstance(qs, list):
+        raise ai.AIError("the AI's answer wasn't a list of questions")
+    return [" ".join(str(q).split())[:160] for q in qs if str(q).strip()][:3]
+
+
+def breakdown_context(task_id):
+    """The prompt for breaking one to-do list task into 5-15 minute steps that cover all of it, and its schema. The
+    app turns the steps into its first step, its length (their total, padded) and the pieces of a cut-up day. The
+    answer uses the planner's item shape so Apple Intelligence can reuse the planner's fixed structure."""
+    cfg = load_config()
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        tasks = []
+    t = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id), None)
+    if not t:
+        raise ai.AIError("that task isn't on the list")
+    step = {"type": "object", "properties": {"ref": {"type": "string"}, "task": {"type": "string"}, "minutes": {"type": "integer"},
+            "start": {"type": "string"}, "done": {"type": "boolean"}, "why": {"type": "string"}},
+            "required": ["ref", "task", "minutes", "start", "done", "why"], "additionalProperties": False}
+    schema = {"type": "object", "properties": {"items": {"type": "array", "items": step}, "reply": {"type": "string"}},
+              "required": ["items", "reply"], "additionalProperties": False}
+    about = (cfg.get("about_me") or "").strip() or "no details given"
+    prompt = f"""Break this task from someone's to-do list into the steps they'd actually do, in order, covering ALL of it.
+About them: {about}
+- Each step concrete and simple enough to start without thinking ("open the problem set PDF and read question 1",
+  "write 3 bullet points for the intro"). The first step should be the easiest way in.
+- 5-15 minutes each, realistic for a student doing it carefully (not the best case). A big task gets many steps:
+  "review lectures 5-11" is seven lectures' worth.
+- At most 40 steps.
+Return them as items: ref "new", the step as task, its minutes, start "", done false, why "". reply: "ok".
+
+Task: {t.get("title", "")}
+What they've said about it: {json.dumps(task_line(t))}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def breakdown_from_ai(task_id):
+    ctx = breakdown_context(task_id)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    items = res.get("items") if isinstance(res, dict) else None
+    if not isinstance(items, list):
+        raise ai.AIError("the AI's answer wasn't a list of steps")
+    out = []
+    for it in items[:40]:
+        if not isinstance(it, dict):
+            continue
+        task = " ".join(str(it.get("task") or "").split())[:120]
+        try:
+            minutes = min(max(int(it.get("minutes") or 10), 5), 20)
+        except (TypeError, ValueError):
+            minutes = 10
+        if task:
+            out.append({"task": task, "minutes": minutes})
+    return out
+
+
+def tiny_context(info):
+    """The prompt for the single smallest next action on a task: something under 5 minutes that gets them moving."""
+    cfg = load_config()
+    task = " ".join(str(info.get("task") or "").split())[:200]
+    if not task:
+        raise ai.AIError("no task")
+    steps = [str(s)[:120] for s in (info.get("steps") or [])][:20]
+    schema = {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"},
+              "description": "exactly one item: the action"}}, "required": ["questions"], "additionalProperties": False}
+    prompt = f"""Someone is stuck and can't start. Give them the single smallest next action on this task: one physical,
+concrete thing that takes under 5 minutes and needs no decisions ("open the essay doc and read the last paragraph you
+wrote", "write the first problem's question at the top of a blank page"). Not a plan, not advice: just the action,
+under 20 words, starting with a verb. Return it as the one item in "questions".
+
+Task: {task}
+What they've said about it: {str(info.get("details") or "")[:600] or "nothing"}
+Minutes already worked on it: {int(info.get("spent") or 0)}
+Its steps, if known: {json.dumps(steps)}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def tiny_from_ai(info):
+    ctx = tiny_context(info)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    qs = res.get("questions") if isinstance(res, dict) else None
+    if not isinstance(qs, list) or not qs or not str(qs[0]).strip():
+        raise ai.AIError("no step came back")
+    return " ".join(str(qs[0]).split())[:160]
 
 
 def todos_from_ai(text, day="today"):
@@ -254,6 +473,7 @@ def apply_plan(ctx, text, res):
     if not isinstance(res, dict) or not isinstance(res.get("items"), list):
         raise ai.AIError("the AI's answer wasn't a plan: try again")
     known = {t["id"]: t for t in items} | {b["id"]: b for b in backlog}
+    listed = {"L:" + t["id"]: t for t in load_tasks()}
     new_items, used = [], set()
     for raw in res["items"][:40]:
         it = clean_item(raw) if isinstance(raw, dict) else None
@@ -264,10 +484,15 @@ def apply_plan(ctx, text, res):
         it["id"] = ref if old and ref not in used else uuid.uuid4().hex[:8]
         used.add(it["id"])
         it["block"] = ""
-        if old:   # what the app knows about an item survives a re-plan: time worked, its apps, its rule, repeat
-            for k in ("spent", "apps", "block", "source", "ref"):
+        if old:   # what the app knows about an item survives a re-plan: time worked, its apps, its rule, repeat, list task
+            for k in ("spent", "apps", "block", "source", "ref", "task_id", "effort", "group", "whole", "part", "parts"):
                 if old.get(k):
                     it[k] = old[k]
+        elif ref in listed and ref not in used:   # pulled in from the to-do list
+            it["task_id"] = listed[ref]["id"]
+            if listed[ref].get("effort") in (1, 2, 3):
+                it["effort"] = listed[ref]["effort"]
+            used.add(ref)
         new_items.append(it)
     reply = " ".join(str(res.get("reply") or "Updated your plan.").split())[:200]
     if TODOS.exists():  # keep the previous version, in case an edit goes wrong
@@ -392,6 +617,24 @@ if __name__ == "__main__":
             payload = json.loads(sys.stdin.read() or "{}")
             text = str(payload.get("text") or "")
             print(json.dumps(apply_plan(plan_context(text, day), text, payload.get("result"))))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("questions", "qprompt"):   # qprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            tid = sys.argv[2] if len(sys.argv) > 2 else ""
+            print(json.dumps({"questions": questions_from_ai(tid)} if cmd == "questions" else {"prompt": questions_context(tid)["prompt"]}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("tiny", "tprompt"):   # tprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            info = json.loads(sys.stdin.read() or "{}")
+            print(json.dumps({"step": tiny_from_ai(info)} if cmd == "tiny" else {"prompt": tiny_context(info)["prompt"]}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("breakdown", "bprompt"):   # bprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            tid = sys.argv[2] if len(sys.argv) > 2 else ""
+            print(json.dumps({"steps": breakdown_from_ai(tid)} if cmd == "breakdown" else {"prompt": breakdown_context(tid)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd == "slot":

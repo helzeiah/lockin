@@ -22,6 +22,7 @@
   "recap_at": "21:00",
   "day_end": "23:30",
   "break_minutes": 5,
+  "break_ratio": 5,
   "drift_seconds": 30,
   "renudge_seconds": 120,
   "away_seconds": 45,

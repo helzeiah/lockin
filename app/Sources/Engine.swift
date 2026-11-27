@@ -7,6 +7,7 @@ enum CardAction: Hashable {
     case planTomorrow
     case startTodo(String), snoozeTodo(String), equipSkin(String)
     case lockInEvent(String), skipEvent(String), neverEvent(String)
+    case planListTask(String), planListTaskTomorrow(String), startListTask(String)   // a to-do list task, by id
 }
 
 /// A short message that drops out of the notch for a few seconds (check-ins). Never steals focus, never needs a click.
@@ -64,6 +65,14 @@ final class Engine: ObservableObject {
     @Published var tomorrow: [Todo] = []
     @Published var chat: [ChatMsg] = []
     @Published var backlog: [Todo] = []
+    @Published var todayShape: DayShape?       // today's breaks and finish time, once you've answered
+    @Published var tomorrowShape: DayShape?
+    @Published var todayLevel: Commitment?     // how much you can commit to: sessions get cut to its size
+    @Published var tomorrowLevel: Commitment?
+    @Published var listTasks: [ListTask] = []  // the running to-do list
+    @Published var askingAI: String?           // the list task the AI is thinking up questions for
+    @Published var listError: String?
+    @Published var breakingDown: String?       // the list task the AI is breaking into steps
     @Published var events: [CalEvent] = []
     private var lastDay = today()
     @Published var planning = false
@@ -86,6 +95,7 @@ final class Engine: ObservableObject {
     private var lastOnTask: (app: String, url: String)?
     private var lastIdleNudge = Date().addingTimeInterval(-30 * 60)
     private var lastBlockEnd = Date.distantPast
+    private(set) var nextBreakMinutes = 5      // what the last session earned (Config.breakAfter)
     @Published private(set) var coverShownAt = Date.distantPast
     private var lastCoverSound = Date.distantPast
     private var closeTask: DispatchWorkItem?
@@ -199,8 +209,26 @@ final class Engine: ObservableObject {
         tomorrow = d.tomorrow ?? []
         chat = d.chat ?? []
         backlog = d.backlog ?? []
+        todayShape = d.shape
+        tomorrowShape = d.tomorrow_shape
+        todayLevel = d.level
+        tomorrowLevel = d.tomorrow_level
+        syncListFromPlan(d)
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? todos : tomorrow }
+    func shape(_ day: PlanDay) -> DayShape? { day == .today ? todayShape : tomorrowShape }
+    func level(_ day: PlanDay) -> Commitment? { day == .today ? todayLevel : tomorrowLevel }
+
+    /// How much you can commit to on a day, saved the moment you pick it: the day is re-cut to its size and re-ordered
+    /// hardest first. Picking the same one again clears it (sessions then stay as they are).
+    func setLevel(_ level: Commitment?, day: PlanDay) {
+        var d = TodoDoc.load()
+        if day == .today { d.level = level } else { d.tomorrow_level = level }
+        d.save(); reloadTodos()
+        appendLog(["type": "commitment", "day": day.rawValue, "level": level?.rawValue ?? ""])
+        arrangeDay(day, recut: true)
+        showPlanNote(level.map { "\($0.title) day: \($0.blurb.lowercased()), hardest first" } ?? "No commitment level: sessions stay as they are")
+    }
 
     func refreshEvents() {
         guard (cfg.calendar_mode ?? "ask") != "off" else { events = []; return }
@@ -227,10 +255,10 @@ final class Engine: ObservableObject {
                 let start = p.start ?? (day == .today ? soonestSlot(minutes: minutes) : "")
                 let match = TaskMatch.apps(for: p.task, cfg: cfg, history: history)
                 DispatchQueue.main.sync {
-                    self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule)
+                    self.addTodo(task: p.task, minutes: minutes, start: start, day: day, apps: match.apps, rule: match.rule, pinned: p.start != nil)
                 }
             }
-            Task { @MainActor in self.planning = false }
+            Task { @MainActor in self.planning = false; if day == .today { self.arrangeDay(.today) } }
         }
     }
 
@@ -308,26 +336,80 @@ final class Engine: ObservableObject {
         return n
     }
 
-    func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil) {
+    /// The plan follows the day (see TodoDoc.retimed): today's open sessions re-timed from `from` around the calendar
+    /// and your breaks, ending by your finish time. Returns how many moved. Today not between midnight and 4am, when
+    /// the clock and the plan day disagree. Tomorrow's sessions only move out of the way of its breaks and finish time.
+    @discardableResult func shiftPlan(from: Date, freed: (start: Date, end: Date)? = nil, last: String? = nil, day: PlanDay = .today) -> Int {
+        let (now, busy, end) = bounds(day)
+        if day == .today { guard Calendar.current.isDate(Stats.day(of: now), inSameDayAs: now) else { return 0 } }
         var d = TodoDoc.load()
-        d.edit(day) { $0.append(Todo(id: Todo.newId(), task: task, block: rule ?? "", minutes: minutes, start: start, apps: apps)) }
+        let list = d.list(day)
+        let new = TodoDoc.retimed(list, from: from, busy: busy, dayEnd: end, now: now, freed: freed,
+                                  keep: day == .today ? block?.todoId : nil, last: last, breakAfter: cfg.breakAfter)
+        let moved = zip(list, new).filter { $0.start != $1.start }.count
+        guard moved > 0 else { return 0 }
+        d.edit(day) { $0 = new }; d.save(); reloadTodos()
+        return moved
+    }
+
+    /// What a day's sessions fit around: its "now" (tomorrow: its start), calendar events and your breaks, and when
+    /// work stops (your finish time, else the day_end setting).
+    func bounds(_ day: PlanDay) -> (now: Date, busy: [(Date, Date)], end: Date) {
+        let now = day == .today ? Date() : tomorrowDate()
+        let shape = day == .today ? todayShape : tomorrowShape
+        let busy = (day == .today ? events.filter { !$0.allDay }.map { ($0.start, $0.end) } : []) + (shape?.busy(on: now) ?? [])
+        return (now, busy, parseHHMM(shape?.finish ?? cfg.day_end ?? "23:30", on: now) ?? now)
+    }
+
+    /// Your answer to "when are your breaks, and when do you finish?" for a day: saved with the plan, remembered as the
+    /// starting point next time, and the plan moves to fit it.
+    func setShape(_ shape: DayShape, day: PlanDay) {
+        var d = TodoDoc.load()
+        if day == .today { d.shape = shape } else { d.tomorrow_shape = shape }
+        d.save(); reloadTodos()
+        DayShape.last = shape
+        let timed = Set(list(day).filter { !$0.isDone && !($0.start ?? "").isEmpty }.map(\.id))
+        let n = shiftPlan(from: day == .today ? planAnchor : tomorrowDate(), day: day)
+        let dropped = list(day).filter { timed.contains($0.id) && ($0.start ?? "").isEmpty }.count
+        appendLog(["type": "day_shape", "day": day.rawValue, "breaks": shape.breaks.map { "\($0.start)+\($0.minutes)" }, "finish": shape.finish ?? ""])
+        if dropped > 0 { showPlanNote("\(dropped) session\(dropped == 1 ? "" : "s") won't fit before \(clockLabel(shape.finish ?? cfg.day_end ?? "23:30")). Shorten or move \(dropped == 1 ? "it" : "them")") }
+        else if n > 0 { showPlanNote("Moved \(n) session\(n == 1 ? "" : "s") around your day") }
+    }
+    /// When the next session can start: after the running one (and its break), else now.
+    var planAnchor: Date {
+        guard let b = block else { return Date() }
+        return Date(timeIntervalSince1970: b.ends + (b.kind == "focus" ? Double(cfg.breakAfter(b.minutes)) * 60 : 0))
+    }
+    /// The slot a to-do on today's plan was set for.
+    func slot(of id: String) -> (start: Date, end: Date)? {
+        guard let t = todos.first(where: { $0.id == id }), let a = parseHHMM(t.start ?? "") else { return nil }
+        return (a, a.addingTimeInterval(Double(t.left) * 60))
+    }
+
+    func addTodo(task: String, minutes: Int, start: String, day: PlanDay = .today, apps: [String]? = nil, rule: String? = nil, pinned: Bool = false) {
+        var d = TodoDoc.load()
+        d.edit(day) { $0.append(Todo(id: Todo.newId(), task: task, block: rule ?? "", minutes: minutes, start: start, apps: apps,
+                                     pinned: pinned && !start.isEmpty ? true : nil)) }
         d.save(); reloadTodos()
     }
 
-    /// Edits a to-do wherever it is (today, tomorrow or the backlog). Only the fields passed change.
+    /// Edits a to-do wherever it is (today, tomorrow or the backlog). Only the fields passed change. A new time is one
+    /// you chose, so the plan flows around it (pinned) until it goes by.
     func updateTodo(_ id: String, task: String? = nil, start: String? = nil, minutes: Int? = nil, apps: [String]? = nil) {
         var d = TodoDoc.load()
         func apply(_ t: inout Todo) {
             if let task { t.task = task }
-            if let start { t.start = start }
+            if let start, start != t.start { t.start = start; t.pinned = start.isEmpty ? nil : true }
             if let minutes { t.minutes = minutes }
             if let apps { t.apps = apps }
         }
+        let onToday = d.items.contains { $0.id == id }
         if let i = d.items.firstIndex(where: { $0.id == id }) { apply(&d.items[i]) }
         else if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { apply(&d.tomorrow![i]) }
         else if let i = d.backlog?.firstIndex(where: { $0.id == id }) { apply(&d.backlog![i]) }
         else { return }
         d.sortItems(); d.save(); reloadTodos()
+        if onToday, start != nil || minutes != nil { shiftPlan(from: planAnchor) }   // anything it now overlaps moves out of the way
         if var b = self.block, b.todoId == id {      // edited while it's running
             if let task { b.task = task }
             if let apps { b.apps = apps }
@@ -421,6 +503,13 @@ final class Engine: ObservableObject {
         block?.activeSeconds = 0; block?.offlineSeconds = 0; block?.idleSeconds = 0; lastEval = nil
         appendLog(["type": "block_start", "name": block!.name, "minutes": m, "task": task ?? "", "apps": apps])
         persist()
+        if let todoId, todos.contains(where: { $0.id == todoId }) {   // started early or late: the rest of today moves to fit
+            let planned = slot(of: todoId)
+            var d = TodoDoc.load()
+            if let i = d.items.firstIndex(where: { $0.id == todoId }) { d.items[i].start = hhmm(Date()); d.items[i].pinned = nil; d.save() }
+            reloadTodos()
+            shiftPlan(from: planAnchor, freed: planned)
+        }
         if AppState.load().plan_shown != today() { passGate(how: "session") }   // starting work counts as starting the day
         let names = apps.prefix(3).joined(separator: ", ") + (apps.count > 3 ? " +\(apps.count - 3)" : "")
         show(Card(icon: "lock.fill", tint: "green", title: task ?? "Locked in",
@@ -444,8 +533,9 @@ final class Engine: ObservableObject {
         return cfg.blocks.first { $0.name.lowercased() == n } ?? TaskMatch.rule(for: name, in: cfg.blocks)
     }
 
+    /// A break as long as the last session earned (see Config.breakAfter).
     func startBreak() {
-        let m = cfg.break_minutes ?? 5, t = Date().timeIntervalSince1970
+        let m = nextBreakMinutes, t = Date().timeIntervalSince1970
         block = ActiveBlock(kind: "break", name: "Break", task: nil, todoId: nil, started: t, ends: t + Double(m * 60), minutes: m, offSeconds: 0)
         blocked = nil; persist()
     }
@@ -466,6 +556,7 @@ final class Engine: ObservableObject {
             return
         }
         let elapsed = Int((Date().timeIntervalSince1970 - b.started) / 60)
+        nextBreakMinutes = cfg.breakAfter(elapsed)   // the break scales with how long you were locked in
         // Only real work counts: active minutes, plus away time on offline-ok tasks. (Old sessions: elapsed minus off-task.)
         let focused = b.tracked ? min(elapsed, b.countedMinutes) : max(0, elapsed - Int(b.offSeconds / 60))
         let idleMin = Int(((b.idleSeconds ?? 0) / 60).rounded())
@@ -477,8 +568,11 @@ final class Engine: ObservableObject {
         entry["sig"] = Integrity.sign(entry)
         appendLog(entry)
         if let id = b.todoId {
-            if completed { setDone(id, true) }
+            let ran = slot(of: id).map { (start: $0.start, end: Date(timeIntervalSince1970: b.ends)) }
+            if completed { setDone(id, true, shift: false) }
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
+            // The rest of today moves to fit, after a break; what's left of a session ended early goes after the others.
+            shiftPlan(from: Date().addingTimeInterval(Double(nextBreakMinutes) * 60), freed: ran, last: completed ? nil : id)
         }
         let before = todayMinutes
         let st = stats()
@@ -487,7 +581,7 @@ final class Engine: ObservableObject {
         guard !silent else { return }
         let xp = xpGain(rBefore.xp, rAfter.xp, worked: activeMin + offlineMin / 2, planned: b.minutes, completed: completed)
         let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
-        let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
+        let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(nextBreakMinutes) min", action: .startBreak, primary: true)]
         Skin.noteLevel(rAfter.level)
         if rAfter.level > rBefore.level {   // the card plays the fanfare when its bar crosses into the new level
             let skin = Skin.all.last { $0.level > rBefore.level && $0.level <= rAfter.level }
@@ -618,6 +712,9 @@ final class Engine: ObservableObject {
                 updateTodo(id, start: hhmm(Date().addingTimeInterval(600)))
             }
         case .equipSkin(let id): Skin.equip(id)
+        case .planListTask(let id): if let t = listTasks.first(where: { $0.id == id }) { planFromList([t], day: .today) }
+        case .planListTaskTomorrow(let id): if let t = listTasks.first(where: { $0.id == id }) { planFromList([t], day: .tomorrow) }
+        case .startListTask(let id): if let t = listTasks.first(where: { $0.id == id }) { startFromList(t) }
         case .lockInEvent(let id):
             if let ev = events.first(where: { $0.id == id }) {
                 startSession(task: ev.title, minutes: max(5, Int(ev.end.timeIntervalSince(Date()) / 60)))
@@ -930,11 +1027,16 @@ final class Engine: ObservableObject {
 
     // MARK: to-dos
 
-    func setDone(_ id: String, _ done: Bool) {
+    /// Ticking off one of today's sessions moves the ones queued behind it up (`shift`).
+    func setDone(_ id: String, _ done: Bool, shift: Bool = true) {
+        let freed = done ? slot(of: id) : nil
         var d = TodoDoc.load()
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].done = done }
         if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { d.tomorrow![i].done = done }
-        d.save(); reloadTodos()
+        d.save()
+        if let tid = (d.items + (d.tomorrow ?? [])).first(where: { $0.id == id })?.task_id { setListDone(tid, done, plan: false) }
+        reloadTodos()
+        if shift, let freed, block?.todoId != id { shiftPlan(from: planAnchor, freed: freed) }
     }
     func addSpent(_ id: String, _ minutes: Int) {
         guard minutes > 0 else { return }
@@ -992,6 +1094,7 @@ final class Engine: ObservableObject {
                 let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
                 if let err = obj?["error"] as? String { self.planError = err } else if obj == nil { self.planError = "no answer from the AI" }
                 self.reloadTodos()
+                if self.planError == nil { self.arrangeDay(day, reorder: false) }   // the AI's sessions cut to the day's level
             }
         }
     }
@@ -1052,10 +1155,25 @@ final class Engine: ObservableObject {
         if minuteCount % 10 == 0 { refreshEvents() }
         if block?.kind == "focus" { persist() }
         todayMinutes = finishedToday()
-        morningCheck(); duePlanned(); dueEvents(); idleNudge()
+        catchUp(); morningCheck(); duePlanned(); dueEvents(); dueNudge(); idleNudge(); breakDownNext()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
         if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }
+    }
+
+    /// A planned start went by without its session (away, asleep, auto-start off, another session ran long): the rest of
+    /// today slides to fit. Repeats and calendar sessions keep their time.
+    private func catchUp() {
+        let now = Date()
+        let missed = todos.contains { t in
+            guard !t.isDone, t.source == nil, t.id != block?.todoId, let s = parseHHMM(t.start ?? "") else { return false }
+            return now.timeIntervalSince(s) >= 120
+        }
+        guard missed else { return }
+        let n = shiftPlan(from: planAnchor)
+        if n > 0, let next = todos.first(where: { t in !t.isDone && t.id != block?.todoId && (parseHHMM(t.start ?? "").map { $0 >= now } ?? false) }) {
+            showFlash("Plan moved · \(next.task) at \(clockLabel(next.start))", icon: "clock.arrow.circlepath", tint: "blue")
+        }
     }
 
     /// A planned session's time came: a countdown in the notch, then it starts ("In 10 min" moves it).

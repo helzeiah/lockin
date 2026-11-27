@@ -25,7 +25,9 @@ final class Gate {
             w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
             w.isReleasedWhenClosed = false
-            w.contentView = NSHostingView(rootView: isMain ? AnyView(GateView().environmentObject(e)) : AnyView(GateDim()))
+            let host = NSHostingView(rootView: isMain ? AnyView(GateView().environmentObject(e)) : AnyView(GateDim()))
+            host.sizingOptions = []   // exactly the screen, however long the plan on it gets
+            w.contentView = host
             w.alphaValue = 0
             w.orderFrontRegardless()
             if isMain { w.makeKey() }
@@ -148,6 +150,10 @@ struct GateView: View {
                         .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
+            LevelPicker(day: .today)
+            DayShapeCard(day: .today)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.05)))
             if open.isEmpty && upcomingEvents.isEmpty {
                 Text("Nothing planned yet. What are you locking in on today?")
                     .font(.system(size: 14)).foregroundStyle(.secondary).padding(.vertical, 6)

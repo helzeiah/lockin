@@ -15,6 +15,7 @@ final class SettingsModel: ObservableObject {
     @Published var driftSeconds: Double
     @Published var renudgeSeconds: Double
     @Published var breakMinutes: Int
+    @Published var breakRatio: Int             // the session ÷ this; 0 = always breakMinutes
     @Published var macAwayMinutes: Double
     @Published var morningHour: Int
     @Published var recapAt: Date
@@ -57,6 +58,7 @@ final class SettingsModel: ObservableObject {
         driftSeconds = c.drift_seconds ?? 30
         renudgeSeconds = c.renudge_seconds ?? 120
         breakMinutes = c.break_minutes ?? 5
+        breakRatio = c.breakRatio
         macAwayMinutes = (c.mac_away_seconds ?? 180) / 60
         morningHour = c.morning_hour ?? 5
         recapAt = SettingsModel.time(c.recap_at ?? "21:00")
@@ -139,6 +141,7 @@ final class SettingsModel: ObservableObject {
             raw["drift_seconds"] = driftSeconds
             raw["renudge_seconds"] = renudgeSeconds
             raw["break_minutes"] = breakMinutes
+            raw["break_ratio"] = breakRatio
             raw["mac_away_seconds"] = macAwayMinutes * 60
             raw["morning_hour"] = morningHour
             raw["recap_at"] = hhmm(recapAt)
@@ -437,6 +440,13 @@ struct DayTab: View {
     @State private var advanced = false
     @State private var calendarAllowed = CalendarFeed.allowed
 
+    /// "A 25-min session earns a 5-min break, 90 min earns 18."
+    private var breakExample: String {
+        let r = Double(m.breakRatio)
+        func b(_ minutes: Int) -> Int { max(1, Int((Double(minutes) / r).rounded())) }
+        return "Based on how long you were locked in: 25 min earns a \(b(25))-min break, 90 min earns \(b(90))."
+    }
+
     var body: some View {
         Form {
             Section {
@@ -451,7 +461,15 @@ struct DayTab: View {
             }
             Section("Sessions") {
                 Toggle("Start planned sessions at their time (15-second countdown)", isOn: $m.autoStart)
-                LabeledContent("Break length") { Stepper("\(m.breakMinutes) min", value: $m.breakMinutes, in: 1...30) }
+                Picker("Breaks", selection: $m.breakRatio) {
+                    ForEach(3...6, id: \.self) { r in Text("Your session ÷ \(r)").tag(r) }
+                    Text("Always the same length").tag(0)
+                }
+                if m.breakRatio == 0 {
+                    LabeledContent("Break length") { Stepper("\(m.breakMinutes) min", value: $m.breakMinutes, in: 1...30) }
+                } else {
+                    Text(breakExample).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
                 Toggle("Halfway and last-minute check-ins", isOn: $m.checkIns)
                 Toggle("Soft sounds", isOn: $m.sounds)
             }

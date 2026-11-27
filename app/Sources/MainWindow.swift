@@ -3,11 +3,12 @@ import SwiftUI
 
 /// Every section of the main window. Today and Stats are daily; Setup is how lockin behaves.
 enum PlannerTab: String, CaseIterable, Identifiable {
-    case plan, stats, apps, blocking, day, ai
+    case plan, tasks, stats, apps, blocking, day, ai
     var id: String { rawValue }
     var title: String {
         switch self {
         case .plan: return "Today"
+        case .tasks: return "To-do"
         case .stats: return "Stats"
         case .apps: return "Lock-in apps"
         case .blocking: return "Blocking"
@@ -18,6 +19,7 @@ enum PlannerTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .plan: return "sun.max"
+        case .tasks: return "checklist"
         case .stats: return "chart.bar"
         case .apps: return "square.grid.2x2"
         case .blocking: return "lock"
@@ -35,7 +37,7 @@ enum PlannerTab: String, CaseIterable, Identifiable {
         default: return ""
         }
     }
-    static let daily: [PlannerTab] = [.plan, .stats]
+    static let daily: [PlannerTab] = [.plan, .tasks, .stats]
     static let setup: [PlannerTab] = [.apps, .blocking, .day, .ai]
 }
 
@@ -98,6 +100,7 @@ struct MainView: View {
     @ViewBuilder private var detail: some View {
         switch e.plannerTab {
         case .plan: TodayView()
+        case .tasks: TasksView()
         case .stats: StatsPage()
         default:
             VStack(alignment: .leading, spacing: 0) {

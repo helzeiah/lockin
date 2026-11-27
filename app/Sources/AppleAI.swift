@@ -50,4 +50,22 @@ enum AppleAI {
         #endif
         throw failure(status.text)
     }
+
+    /// Up to 3 questions about a to-do list task, to the same fixed structure.
+    static func questions(prompt: String) async throws -> [String] {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *) {
+            guard status.ok else { throw failure(status.text) }
+            let root = DynamicGenerationSchema(name: "Questions", properties: [
+                .init(name: "questions", description: "at most 3 short questions", schema: .init(arrayOf: .init(type: String.self))),
+            ])
+            let schema = try GenerationSchema(root: root, dependencies: [])
+            let session = LanguageModelSession(instructions: "You help someone plan a task inside a focus app. Follow the rules in the request exactly.")
+            let answer = try await session.respond(to: prompt, schema: schema)
+            let obj = (try? JSONSerialization.jsonObject(with: Data(answer.content.jsonString.utf8))) as? [String: Any]
+            return obj?["questions"] as? [String] ?? []
+        }
+        #endif
+        throw failure(status.text)
+    }
 }

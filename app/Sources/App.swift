@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "stop": e.stopBlock(completed: false)
                 case "plan": Planner.shared.open(tab: .plan, day: .today)
                 case "tomorrow": Planner.shared.open(tab: .plan, day: .tomorrow)
+                case "todo": Planner.shared.open(tab: .tasks)
                 case "today": e.showPlan()
                 case "recap": e.showRecap()
                 case "stats": e.showStats()

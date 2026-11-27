@@ -22,7 +22,11 @@ final class Planner {
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
         w.minSize = NSSize(width: 720, height: 520)
-        w.contentView = NSHostingView(rootView: MainView().environmentObject(e))
+        let host = NSHostingView(rootView: MainView().environmentObject(e))
+        // Only the minimum size comes from the content. Otherwise a long scrolling list (the plan, the to-do list)
+        // asks for its whole height and the window grows past the top of the screen.
+        host.sizingOptions = [.minSize]
+        w.contentView = host
         w.center()
         window = w
         w.show()
@@ -133,7 +137,15 @@ struct TodayView: View {
         VStack(spacing: 0) {
             header
             if day == .today, e.block != nil { SessionBanner().padding(.horizontal, 22).padding(.bottom, 10) }
-            if entries.isEmpty { empty } else { timeline }
+            // The day's questions scroll with the plan, so the window never grows taller than the screen.
+            ScrollView {
+                VStack(spacing: 0) {
+                    LevelPicker(day: day).padding(.horizontal, 12).padding(.bottom, 10)
+                    DayShapeCard(day: day).padding(.horizontal, 12).padding(.bottom, 12)
+                    if entries.isEmpty { empty } else { timeline }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 12)
+            }
             if day == .today && !e.backlog.isEmpty { backlogSection }
             composer
         }
@@ -185,33 +197,28 @@ struct TodayView: View {
     // MARK: timeline
 
     private var timeline: some View {
-        ScrollView {
-            LazyVStack(spacing: 2) {
-                let nextId = day == .today ? e.nextTodo?.id : nil
-                ForEach(entries, id: \.id) { entry in
-                    switch entry {
-                    case .todo(let t):
-                        if editingId == t.id { TodoEditor(t: t, day: day) { editingId = nil }.padding(.vertical, 4) }
-                        else { TodoRow(t: t, day: day, isNext: t.id == nextId, hoverId: $hoverId, editingId: $editingId) }
-                    case .event(let ev): EventRow(ev: ev)
-                    }
+        LazyVStack(spacing: 2) {
+            let nextId = day == .today ? e.nextTodo?.id : nil
+            ForEach(entries, id: \.id) { entry in
+                switch entry {
+                case .todo(let t):
+                    if editingId == t.id { TodoEditor(t: t, day: day) { editingId = nil }.padding(.vertical, 4) }
+                    else { TodoRow(t: t, day: day, isNext: t.id == nextId, hoverId: $hoverId, editingId: $editingId) }
+                case .event(let ev): EventRow(ev: ev)
                 }
             }
-            .padding(.horizontal, 16).padding(.bottom, 12)
         }
     }
 
     private var empty: some View {
         VStack(spacing: 10) {
-            Spacer()
             Image(systemName: day == .today ? "sun.max" : "moon.stars").font(.system(size: 30, weight: .light)).foregroundStyle(.secondary)
             Text(day == .today ? "Nothing planned yet" : "Plan tomorrow tonight").font(.system(size: 16, weight: .semibold))
             Text(day == .today ? "Type what you'll lock in on below, all in one line.\nlockin picks the times and the apps for each one."
                                : "Whatever you add here is waiting on your morning screen,\nso the day starts with a plan instead of a blank page.")
                 .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Spacer()
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 
     // MARK: backlog
@@ -283,6 +290,10 @@ struct TodayView: View {
             HStack {
                 summary
                 Spacer()
+                if e.listTasks.contains(where: { t in !t.isDone && !items.contains { $0.task_id == t.id } }) {
+                    Button("Fill from to-do list") { e.fillFromList(day) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Theme.accent)
+                        .disabled(e.planning).help("Fill the free time with the most important tasks on your to-do list")
+                }
                 if !items.isEmpty { Button("Clear \(day == .today ? "today" : "tomorrow")") { e.clearDay(day) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
         }
@@ -377,6 +388,9 @@ struct TodoRow: View {
             .buttonStyle(.plain).help("Apps this session allows")
             .popover(isPresented: $picking, arrowEdge: .bottom) {
                 AppPicker(selected: Binding(get: { t.apps ?? [] }, set: { e.updateTodo(t.id, apps: $0) }))
+            }
+            if !t.isDone {   // kept in place while not hovered, so its popover stays open when the mouse moves onto it
+                SmallestStepButton(task: t.wholeTask, taskId: t.task_id, spent: t.spent ?? 0, apps: t.apps).opacity(hover ? 1 : 0).allowsHitTesting(hover)
             }
             if hover {
                 Button { editingId = t.id } label: { Image(systemName: "pencil").font(.system(size: 11.5)) }
@@ -739,6 +753,127 @@ struct TimeButton: View {
                 .controlSize(.small)
             }
             .padding(14).frame(width: 270)
+        }
+    }
+}
+
+/// "When do you want a longer break, and when do you want to be done?", asked once for each day you plan (the morning
+/// screen, the planner), starting from your last answer. Once answered it's a one-line summary you click to change.
+struct DayShapeCard: View {
+    @EnvironmentObject var e: Engine
+    let day: PlanDay
+    @State private var editing = false
+    @State private var breaks: [EditBreak] = []
+    @State private var finish = Date()
+    @State private var hasFinish = true
+
+    struct EditBreak: Identifiable { let id = UUID(); var start: Date; var minutes: Int }
+
+    private var shape: DayShape? { e.shape(day) }
+    private var dayDate: Date { day == .today ? Date() : tomorrowDate() }
+
+    var body: some View {
+        Group { if shape == nil || editing { form } else { summary } }
+            .onAppear(perform: load)
+            .onChange(of: day) { _, _ in editing = false; load() }
+    }
+
+    private var summary: some View {
+        Button { load(); editing = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "cup.and.saucer").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Text(shape?.summary ?? "").font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 0)
+                Text("Change").font(.system(size: 11.5)).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).help("Change your breaks and finish time")
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("When do you want a longer break, and when do you want to be done \(day == .today ? "today" : "tomorrow")?")
+                .font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            ForEach($breaks) { $b in
+                HStack(spacing: 8) {
+                    Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 116, alignment: .leading)
+                    DatePicker("", selection: $b.start, displayedComponents: .hourAndMinute).labelsHidden()
+                    Picker("", selection: $b.minutes) {   // up to an afternoon off (a movie with friends, then back to it)
+                        ForEach([15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360], id: \.self) { Text(fmtMinutes($0)).tag($0) }
+                    }
+                    .labelsHidden().frame(width: 120)
+                    Button { breaks.removeAll { $0.id == b.id } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove this break")
+                }
+            }
+            Button { breaks.append(EditBreak(start: nextBreakStart, minutes: 60)) } label: {
+                Label(breaks.isEmpty ? "Add a break" : "Add another break", systemImage: "plus").font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.plain).foregroundStyle(Theme.accent)
+            HStack(spacing: 8) {
+                Toggle("Finish work at", isOn: $hasFinish).toggleStyle(.checkbox).font(.system(size: 12.5)).fixedSize().frame(width: 116, alignment: .leading)
+                DatePicker("", selection: $finish, displayedComponents: .hourAndMinute).labelsHidden().disabled(!hasFinish)
+            }
+            HStack {
+                if shape == nil { Button("Skip") { e.setShape(DayShape(), day: day) }.buttonStyle(SecondaryButtonStyle()) }
+                else { Button("Cancel") { editing = false }.buttonStyle(SecondaryButtonStyle()) }
+                Spacer()
+                Button(day == .today ? "Plan my day" : "Plan tomorrow", action: save).buttonStyle(PrimaryButtonStyle())
+                    .help("Fits your plan to this and fills the free time from your to-do list")
+            }
+            .controlSize(.small)
+        }
+    }
+
+    /// An hour after the last break, else 12:30.
+    private var nextBreakStart: Date {
+        breaks.last.map { $0.start.addingTimeInterval(Double($0.minutes + 60) * 60) } ?? parseHHMM("12:30", on: dayDate) ?? dayDate
+    }
+
+    /// The day's answer, else your last one, else a lunch hour and a 6pm finish.
+    private func load() {
+        let s = shape ?? DayShape.last ?? DayShape(breaks: [.init(start: "12:30", minutes: 60)], finish: "18:00")
+        breaks = s.breaks.compactMap { b in parseHHMM(b.start, on: dayDate).map { EditBreak(start: $0, minutes: b.minutes) } }
+        hasFinish = s.finish != nil
+        finish = parseHHMM(s.finish ?? "18:00", on: dayDate) ?? dayDate
+    }
+
+    private func save() {
+        let list = breaks.sorted { $0.start < $1.start }.map { DayShape.Break(start: hhmm($0.start), minutes: $0.minutes) }
+        e.setShape(DayShape(breaks: list, finish: hasFinish ? hhmm(finish) : nil), day: day)
+        e.fillFromList(day)   // the day gets built from your to-do list, around what's already planned
+        editing = false
+    }
+}
+
+/// "How much can you commit to today?": Small, Medium or Large, saved the moment you pick one (the day is re-cut to its
+/// size). Asked fresh each day: how today feels isn't how yesterday did. Picking the chosen one again clears it.
+struct LevelPicker: View {
+    @EnvironmentObject var e: Engine
+    let day: PlanDay
+
+    var body: some View {
+        let chosen = e.level(day)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("How much can you commit to \(day == .today ? "today" : "tomorrow")?").font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 8) {
+                ForEach(Commitment.allCases, id: \.self) { c in
+                    Button { e.setLevel(chosen == c ? nil : c, day: day) } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(c.title).font(.system(size: 13, weight: .semibold))
+                            Text(c.blurb).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(chosen == c ? Theme.accent.opacity(0.18) : Color.primary.opacity(0.05)))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(chosen == c ? Theme.accent.opacity(0.7) : .clear))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).disabled(e.planning)
+                    .help(chosen == c ? "Click again to clear it" : "Re-cuts the day: \(c.blurb.lowercased()), hardest first")
+                }
+            }
         }
     }
 }
