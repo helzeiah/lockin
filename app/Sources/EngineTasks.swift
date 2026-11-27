@@ -53,7 +53,7 @@ extension Engine {
     func planFromList(_ tasks: [ListTask], day: PlanDay) {
         let fresh = tasks.filter { t in !t.isDone && !list(day).contains { $0.task_id == t.id } }
         guard !fresh.isEmpty else { return }
-        let cfg = self.cfg, level = shape(day)?.level
+        let cfg = self.cfg, level = level(day)
         planning = true
         Task.detached(priority: .userInitiated) {
             let history = TaskMatch.history()
@@ -84,24 +84,51 @@ extension Engine {
     /// you haven't started, for a new level), then the most time-sensitive, hardest and longest first while you're
     /// fresh, easier ones as the day goes on. Today they're timed one after another from now, around your calendar,
     /// breaks and finish time; times you set yourself and repeats stay put. Tomorrow's are just put in that order.
-    func arrangeDay(_ day: PlanDay, recut: Bool = false) {
+    /// `reorder: false` (after the AI plans) only cuts to the level: the AI's order and times stay, pieces follow
+    /// the piece before them.
+    func arrangeDay(_ day: PlanDay, recut: Bool = false, reorder: Bool = true) {
         var d = TodoDoc.load()
         var list = d.list(day)
         let keep = day == .today ? block?.todoId : nil
-        if let level = shape(day)?.level {
+        if let level = level(day) {
             list = recut ? TodoDoc.recut(list, level, keep: keep)
                          : list.flatMap { t in t.part == nil && !t.isDone && (t.spent ?? 0) == 0 && t.source == nil && t.id != keep
                                                 ? TodoDoc.cut(t, level, firstStep: listTasks.first { $0.id == t.task_id }?.first_step) : [t] }
         }
-        let due = Dictionary(listTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let offset = day == .today ? 0 : 1
-        list = TodoDoc.prioritized(list) { t in t.task_id.flatMap { due[$0]?.daysLeft() }.map { $0 - offset } }
+        if reorder {
+            let due = Dictionary(listTasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let offset = day == .today ? 0 : 1
+            list = TodoDoc.prioritized(list) { t in t.task_id.flatMap { due[$0]?.daysLeft() }.map { $0 - offset } }
+        }
         if day == .today, Calendar.current.isDate(Stats.day(of: Date()), inSameDayAs: Date()) {
             let (now, busy, end) = bounds(.today)
-            list = TodoDoc.retimed(list, from: planAnchor, busy: busy, dayEnd: end, now: now, keep: keep, breakAfter: cfg.breakAfter, pack: true)
+            list = TodoDoc.retimed(list, from: planAnchor, busy: busy, dayEnd: end, now: now, keep: keep, breakAfter: cfg.breakAfter, pack: reorder)
         }
         d.edit(day) { $0 = list }
         d.save(); reloadTodos()
+    }
+
+    // MARK: the smallest step
+
+    /// The one smallest thing you could do on a task right now, under 5 minutes. With the AI planner on, the AI writes
+    /// it from the task, its steps and how far you've got; otherwise (or if the AI can't) it's the task's first step.
+    func smallestStep(task: String, taskId: String?, spent: Int) async -> String {
+        let lt = taskId.flatMap { id in listTasks.first { $0.id == id } }
+        let fallback = (lt?.first_step).flatMap { $0.isEmpty ? nil : $0 } ?? "Open what you need for \u{201C}\(task)\u{201D} and spend two minutes on the very first bit"
+        guard cfg.aiOn else { return fallback }
+        let info: [String: Any] = ["task": task, "details": lt?.details ?? "", "spent": spent, "steps": (lt?.steps ?? []).map(\.task)]
+        guard let input = (try? JSONSerialization.data(withJSONObject: info)).flatMap({ String(data: $0, encoding: .utf8) }) else { return fallback }
+        let apple = cfg.ai?.provider == "apple"
+        let step: String? = await Task.detached(priority: .userInitiated) {
+            if apple {   // Apple Intelligence runs in the app; the helper writes the prompt
+                let p = (try? JSONSerialization.jsonObject(with: Data(runCoach(["tprompt"], input: input).utf8))) as? [String: Any]
+                guard let prompt = p?["prompt"] as? String else { return nil }
+                return (try? await AppleAI.questions(prompt: prompt))?.first
+            }
+            let o = (try? JSONSerialization.jsonObject(with: Data(runCoach(["tiny"], input: input).utf8))) as? [String: Any]
+            return o?["step"] as? String
+        }.value
+        return step.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? fallback
     }
 
     // MARK: the AI's breakdown

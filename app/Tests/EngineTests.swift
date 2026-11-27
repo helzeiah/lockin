@@ -378,11 +378,23 @@ struct EngineTests {
 
             // Planning tomorrow on a small day: the list task arrives in pieces, hardest first.
             try! json(["date": today(), "items": [], "tomorrow": [["id": "t1", "task": "Light reading", "minutes": 20, "effort": 1]],
-                       "tomorrow_shape": ["breaks": [], "level": "small"]]).write(to: Paths.todos)
+                       "tomorrow_level": "small"]).write(to: Paths.todos)
             TaskListDoc(tasks: [ListTask(id: "L9", title: "Problem set", minutes: 30, first_step: "print it", effort: 3)]).save()
             e.reloadTodos()
             e.arrangeDay(.tomorrow)
             check(e.tomorrow.map(\.task) == ["Light reading (1/2)", "Light reading (2/2)"], "arrangeDay cuts to the level: \(e.tomorrow.map(\.task))")
+            // Choosing a level saves it straight away and re-cuts the day.
+            e.setLevel(.large, day: .tomorrow)
+            check(TodoDoc.load().tomorrow_level == .large && e.tomorrowLevel == .large, "the level is saved the moment it's picked")
+            check(e.tomorrow.map(\.task) == ["Light reading"], "a new level joins the pieces back up: \(e.tomorrow.map(\.task))")
+
+            // The smallest step without the AI: the task's first step.
+            let sem = DispatchSemaphore(value: 0)
+            var smallest = ""
+            Task { @MainActor in smallest = await e.smallestStep(task: "Problem set", taskId: "L9", spent: 0); sem.signal() }
+            while sem.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            check(smallest == "print it", "smallest step falls back to the first step: \(smallest)")
+
             try! json(["date": today(), "items": []]).write(to: Paths.todos)
             try? FileManager.default.removeItem(at: Paths.tasks)
             e.reloadTodos()

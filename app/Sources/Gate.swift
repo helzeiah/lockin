@@ -150,6 +150,7 @@ struct GateView: View {
                         .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
+            LevelPicker(day: .today)
             DayShapeCard(day: .today)
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.05)))

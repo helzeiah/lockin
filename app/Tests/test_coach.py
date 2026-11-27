@@ -207,7 +207,7 @@ class PromptAndApply(unittest.TestCase):
 
     def test_the_day_level_and_hardest_first_reach_the_planner(self):
         doc = json.loads((Path(self.tmp.name) / "todos.json").read_text())
-        doc["shape"] = {"breaks": [], "level": "small"}
+        doc["level"] = "small"
         (Path(self.tmp.name) / "todos.json").write_text(json.dumps(doc))
         (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Pset", "effort": 3}]}))
         p = self.coach.plan_context("plan my day", "today")["prompt"]
@@ -223,6 +223,14 @@ class PromptAndApply(unittest.TestCase):
         self.assertIn("covering ALL of it", p)
         with self.assertRaises(Exception):
             self.coach.breakdown_context("nope")
+
+    def test_tiny_prompt_is_about_the_task(self):
+        p = self.coach.tiny_context({"task": "Econ final study", "spent": 20, "steps": ["Open the slides"]})["prompt"]
+        self.assertIn("Econ final study", p)
+        self.assertIn("Open the slides", p)
+        self.assertIn("under 5 minutes", p)
+        with self.assertRaises(Exception):
+            self.coach.tiny_context({"task": "  "})
 
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")

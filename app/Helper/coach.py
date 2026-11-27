@@ -6,6 +6,7 @@
     coach.py todos [today|tomorrow] -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI edits that day
     coach.py questions TASK_ID    -> up to 3 questions the AI would ask about a to-do list task, to plan it well
     coach.py breakdown TASK_ID    -> a to-do list task broken into 5-15 minute steps covering all of it (realistic minutes)
+    coach.py tiny                 -> {"task", "details", "spent", "steps"} on stdin -> the one smallest next action (< 5 min)
     coach.py test                 -> checks the AI set up in Settings > AI planner
 Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 The app rolls the day over (tomorrow's plan becomes today's) before it calls this script, so this script never does.
@@ -295,7 +296,7 @@ def plan_context(text, day="today"):
         except Exception:
             notes = ""
     which = f"tomorrow ({pdate:%A %B %d})" if tomorrow else "today"
-    level = shape.get("level")
+    level = doc.get("tomorrow_level" if tomorrow else "level")
     sizes = {"small": "5-10", "medium": "25-45", "large": "60-90"}
     level_rule = {
         "small": "Starting feels hard today. Break every task into tiny, concrete 5-10 minute steps, each one simple enough to start without thinking (\"open the doc and write the first heading\"), one item per step.",
@@ -427,6 +428,36 @@ def breakdown_from_ai(task_id):
         if task:
             out.append({"task": task, "minutes": minutes})
     return out
+
+
+def tiny_context(info):
+    """The prompt for the single smallest next action on a task: something under 5 minutes that gets them moving."""
+    cfg = load_config()
+    task = " ".join(str(info.get("task") or "").split())[:200]
+    if not task:
+        raise ai.AIError("no task")
+    steps = [str(s)[:120] for s in (info.get("steps") or [])][:20]
+    schema = {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"},
+              "description": "exactly one item: the action"}}, "required": ["questions"], "additionalProperties": False}
+    prompt = f"""Someone is stuck and can't start. Give them the single smallest next action on this task: one physical,
+concrete thing that takes under 5 minutes and needs no decisions ("open the essay doc and read the last paragraph you
+wrote", "write the first problem's question at the top of a blank page"). Not a plan, not advice: just the action,
+under 20 words, starting with a verb. Return it as the one item in "questions".
+
+Task: {task}
+What they've said about it: {str(info.get("details") or "")[:600] or "nothing"}
+Minutes already worked on it: {int(info.get("spent") or 0)}
+Its steps, if known: {json.dumps(steps)}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def tiny_from_ai(info):
+    ctx = tiny_context(info)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    qs = res.get("questions") if isinstance(res, dict) else None
+    if not isinstance(qs, list) or not qs or not str(qs[0]).strip():
+        raise ai.AIError("no step came back")
+    return " ".join(str(qs[0]).split())[:160]
 
 
 def todos_from_ai(text, day="today"):
@@ -592,6 +623,12 @@ if __name__ == "__main__":
         try:
             tid = sys.argv[2] if len(sys.argv) > 2 else ""
             print(json.dumps({"questions": questions_from_ai(tid)} if cmd == "questions" else {"prompt": questions_context(tid)["prompt"]}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("tiny", "tprompt"):   # tprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            info = json.loads(sys.stdin.read() or "{}")
+            print(json.dumps({"step": tiny_from_ai(info)} if cmd == "tiny" else {"prompt": tiny_context(info)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd in ("breakdown", "bprompt"):   # bprompt: Apple Intelligence runs in the app, so just the prompt

@@ -184,6 +184,9 @@ struct ListTaskRow: View {
                 Button("Today") { e.planFromList([t], day: .today) }.buttonStyle(SecondaryButtonStyle()).disabled(e.planning)
                     .help("Put it on today's plan at the soonest open time")
             }
+            if !t.isDone {   // kept in place while not hovered, so its popover stays open when the mouse moves onto it
+                SmallestStepButton(task: t.title, taskId: t.id).opacity(hover ? 1 : 0).allowsHitTesting(hover)
+            }
             if hover {
                 Button { e.deleteListTask(t.id) } label: { Image(systemName: "trash").font(.system(size: 11)) }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
@@ -408,5 +411,49 @@ struct TaskQuestionsCard: View {
     private func setDue(_ d: Date?) {
         guard let d else { return }
         e.updateListTask(t.id) { $0.due = DateFormatter.ymd.string(from: d) }
+    }
+}
+
+/// 👣: the one smallest thing you could do on a task right now (see Engine.smallestStep), and a 5-minute session on it.
+/// For the moments when even a small session feels like too much.
+struct SmallestStepButton: View {
+    @EnvironmentObject var e: Engine
+    let task: String
+    var taskId: String? = nil
+    var spent = 0
+    var apps: [String]? = nil
+    @State private var open = false
+    @State private var step: String?
+
+    var body: some View {
+        Button { open = true } label: { Image(systemName: "shoeprints.fill").font(.system(size: 11)) }
+            .buttonStyle(.plain).foregroundStyle(.secondary).help("The smallest step you could take right now")
+            .popover(isPresented: $open, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Smallest step").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    if let step {
+                        Text(step).font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button("Another one") { self.step = nil; fetch() }.buttonStyle(SecondaryButtonStyle())
+                            Spacer()
+                            if e.block == nil {
+                                Button("Lock in 5 min") {
+                                    open = false
+                                    e.startSession(task: step, minutes: 5, apps: apps ?? TaskMatch.apps(for: task, cfg: e.cfg).apps)
+                                }
+                                .buttonStyle(PrimaryButtonStyle())
+                            }
+                        }
+                    } else {
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Finding the smallest way in…").font(.system(size: 12.5)).foregroundStyle(.secondary) }
+                    }
+                }
+                .padding(14).frame(width: 320)
+                .onAppear { if step == nil { fetch() } }
+            }
+    }
+
+    private func fetch() {
+        Task { step = await e.smallestStep(task: task, taskId: taskId, spent: spent) }
     }
 }

@@ -67,6 +67,8 @@ final class Engine: ObservableObject {
     @Published var backlog: [Todo] = []
     @Published var todayShape: DayShape?       // today's breaks and finish time, once you've answered
     @Published var tomorrowShape: DayShape?
+    @Published var todayLevel: Commitment?     // how much you can commit to: sessions get cut to its size
+    @Published var tomorrowLevel: Commitment?
     @Published var listTasks: [ListTask] = []  // the running to-do list
     @Published var askingAI: String?           // the list task the AI is thinking up questions for
     @Published var listError: String?
@@ -209,10 +211,24 @@ final class Engine: ObservableObject {
         backlog = d.backlog ?? []
         todayShape = d.shape
         tomorrowShape = d.tomorrow_shape
+        todayLevel = d.level
+        tomorrowLevel = d.tomorrow_level
         syncListFromPlan(d)
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? todos : tomorrow }
     func shape(_ day: PlanDay) -> DayShape? { day == .today ? todayShape : tomorrowShape }
+    func level(_ day: PlanDay) -> Commitment? { day == .today ? todayLevel : tomorrowLevel }
+
+    /// How much you can commit to on a day, saved the moment you pick it: the day is re-cut to its size and re-ordered
+    /// hardest first. Picking the same one again clears it (sessions then stay as they are).
+    func setLevel(_ level: Commitment?, day: PlanDay) {
+        var d = TodoDoc.load()
+        if day == .today { d.level = level } else { d.tomorrow_level = level }
+        d.save(); reloadTodos()
+        appendLog(["type": "commitment", "day": day.rawValue, "level": level?.rawValue ?? ""])
+        arrangeDay(day, recut: true)
+        showPlanNote(level.map { "\($0.title) day: \($0.blurb.lowercased()), hardest first" } ?? "No commitment level: sessions stay as they are")
+    }
 
     func refreshEvents() {
         guard (cfg.calendar_mode ?? "ask") != "off" else { events = []; return }
@@ -350,15 +366,8 @@ final class Engine: ObservableObject {
     func setShape(_ shape: DayShape, day: PlanDay) {
         var d = TodoDoc.load()
         if day == .today { d.shape = shape } else { d.tomorrow_shape = shape }
-        let before = day == .today ? todayShape : tomorrowShape
         d.save(); reloadTodos()
         DayShape.last = shape
-        if shape.level != before?.level {   // a new commitment level: the day is re-cut and re-ordered for it
-            arrangeDay(day, recut: true)
-            appendLog(["type": "day_shape", "day": day.rawValue, "level": shape.level?.rawValue ?? ""])
-            showPlanNote("Planned for a \(shape.level?.title.lowercased() ?? "usual") day: \(shape.level?.blurb.lowercased() ?? "sessions as planned"), hardest first")
-            return
-        }
         let timed = Set(list(day).filter { !$0.isDone && !($0.start ?? "").isEmpty }.map(\.id))
         let n = shiftPlan(from: day == .today ? planAnchor : tomorrowDate(), day: day)
         let dropped = list(day).filter { timed.contains($0.id) && ($0.start ?? "").isEmpty }.count
@@ -1085,6 +1094,7 @@ final class Engine: ObservableObject {
                 let obj = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
                 if let err = obj?["error"] as? String { self.planError = err } else if obj == nil { self.planError = "no answer from the AI" }
                 self.reloadTodos()
+                if self.planError == nil { self.arrangeDay(day, reorder: false) }   // the AI's sessions cut to the day's level
             }
         }
     }

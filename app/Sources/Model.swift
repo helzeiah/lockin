@@ -226,7 +226,6 @@ struct DayShape: Codable, Hashable {
     struct Break: Codable, Hashable { var start: String; var minutes: Int }   // "HH:MM"
     var breaks: [Break] = []
     var finish: String? = nil        // "HH:MM"; nil = the day_end setting
-    var level: Commitment? = nil     // how much you can commit to that day; nil = you didn't say (sessions stay as planned)
 
     /// The breaks as (start, end) on `day`.
     func busy(on day: Date) -> [(Date, Date)] {
@@ -235,7 +234,7 @@ struct DayShape: Codable, Hashable {
     /// "Lunch 12:30 PM for 1 hr · done by 6:00 PM", for the summary line.
     var summary: String {
         let br = breaks.map { "\(clockLabel($0.start)) for \(fmtMinutes($0.minutes))" }
-        let parts = (level.map { ["\($0.title) commitment"] } ?? []) + (br.isEmpty ? ["No long break"] : ["Break " + br.joined(separator: ", ")])
+        let parts = (br.isEmpty ? ["No long break"] : ["Break " + br.joined(separator: ", ")])
             + (finish.map { ["done by \(clockLabel($0))"] } ?? [])
         return parts.joined(separator: " · ")
     }
@@ -257,6 +256,8 @@ struct TodoDoc: Codable {
     var tomorrow: [Todo]? = []
     var shape: DayShape? = nil            // today's breaks and finish time, once asked
     var tomorrow_shape: DayShape? = nil
+    var level: Commitment? = nil          // how much you can commit to today; nil = you didn't say (sessions stay as planned)
+    var tomorrow_level: Commitment? = nil
 
     init(date: String? = "", items: [Todo] = [], chat: [ChatMsg]? = [], backlog: [Todo]? = [], tomorrow: [Todo]? = []) {
         self.date = date; self.items = items; self.chat = chat; self.backlog = backlog; self.tomorrow = tomorrow
@@ -270,6 +271,8 @@ struct TodoDoc: Codable {
         tomorrow = try? c.decodeIfPresent([Todo].self, forKey: .tomorrow)
         shape = try? c.decodeIfPresent(DayShape.self, forKey: .shape)
         tomorrow_shape = try? c.decodeIfPresent(DayShape.self, forKey: .tomorrow_shape)
+        level = try? c.decodeIfPresent(Commitment.self, forKey: .level)
+        tomorrow_level = try? c.decodeIfPresent(Commitment.self, forKey: .tomorrow_level)
     }
 
     static func load() -> TodoDoc {
@@ -306,7 +309,8 @@ struct TodoDoc: Codable {
         backlog = back.values.filter { ($0.from ?? t) >= cutoff }.sorted { ($0.from ?? "") > ($1.from ?? "") }
         items = tomorrowIsToday ? (tomorrow ?? []) : []
         shape = tomorrowIsToday ? tomorrow_shape : nil
-        tomorrow = []; tomorrow_shape = nil; chat = []; date = t
+        level = tomorrowIsToday ? tomorrow_level : nil
+        tomorrow = []; tomorrow_shape = nil; tomorrow_level = nil; chat = []; date = t
         addRoutines(routines, now: now)
         sortItems()
         return true
@@ -332,6 +336,7 @@ struct TodoDoc: Codable {
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? items : (tomorrow ?? []) }
     func shape(_ day: PlanDay) -> DayShape? { day == .today ? shape : tomorrow_shape }
+    func level(_ day: PlanDay) -> Commitment? { day == .today ? level : tomorrow_level }
     mutating func edit(_ day: PlanDay, _ change: (inout [Todo]) -> Void) {
         if day == .today { change(&items) } else { var t = tomorrow ?? []; change(&t); tomorrow = t }
         sortItems()
@@ -354,9 +359,10 @@ struct TodoDoc: Codable {
         for t in items where !t.isDone && t.id != keep && fixed(t) {
             if let a = at(t) { taken.append((a, a.addingTimeInterval(Double(t.left + breakAfter(t.left)) * 60))) }
         }
-        // Pieces of a cut-up task are timed even before they have a time; other untimed to-dos stay "any time".
+        // Pieces of a cut-up task are timed even before they have a time (right after the piece before them); other
+        // untimed to-dos stay "any time".
         var queue = items.indices.filter { !items[$0].isDone && items[$0].id != keep && !fixed(items[$0])
-                                           && (at(items[$0]) != nil || (pack && items[$0].part != nil)) }
+                                           && (at(items[$0]) != nil || items[$0].part != nil) }
         if let last, let i = queue.firstIndex(where: { items[$0].id == last }) { queue.append(queue.remove(at: i)) }
         var out = items, cursor = roundUp(from), pull = freed
         for i in queue {
@@ -454,7 +460,7 @@ func runCoach(_ args: [String], input: String? = nil) -> String {
                "HOME": home, "USER": user, "LOGNAME": user, "LANG": "en_US.UTF-8", "TERM": "xterm",
                "FOCUS_DATA": Paths.dir.path, "FOCUS_CALEVENTS": Paths.calevents.path, "FOCUS_TODAY": today(),
                "PYTHONDONTWRITEBYTECODE": "1"]   // never write __pycache__ into the signed app bundle
-    if ["todos", "test", "questions", "breakdown"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
+    if ["todos", "test", "questions", "breakdown", "tiny"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
     p.environment = env
     let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
     let inp = Pipe(); p.standardInput = inp
