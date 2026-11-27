@@ -22,7 +22,11 @@ final class Planner {
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
         w.minSize = NSSize(width: 720, height: 520)
-        w.contentView = NSHostingView(rootView: MainView().environmentObject(e))
+        let host = NSHostingView(rootView: MainView().environmentObject(e))
+        // Only the minimum size comes from the content. Otherwise a long scrolling list (the plan, the to-do list)
+        // asks for its whole height and the window grows past the top of the screen.
+        host.sizingOptions = [.minSize]
+        w.contentView = host
         w.center()
         window = w
         w.show()

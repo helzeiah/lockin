@@ -25,7 +25,9 @@ final class Gate {
             w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
             w.isReleasedWhenClosed = false
-            w.contentView = NSHostingView(rootView: isMain ? AnyView(GateView().environmentObject(e)) : AnyView(GateDim()))
+            let host = NSHostingView(rootView: isMain ? AnyView(GateView().environmentObject(e)) : AnyView(GateDim()))
+            host.sizingOptions = []   // exactly the screen, however long the plan on it gets
+            w.contentView = host
             w.alphaValue = 0
             w.orderFrontRegardless()
             if isMain { w.makeKey() }

@@ -159,8 +159,13 @@ struct ListTaskRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(t.title).font(.system(size: 14, weight: .medium)).strikethrough(t.isDone)
                     .foregroundStyle(t.isDone ? .tertiary : .primary).lineLimit(2)
-                if !t.details.isEmpty {
-                    Text(t.details).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                // Notes on one line, the first step on the next; answers to the AI's questions live in the editor.
+                if let n = t.notes, !n.isEmpty {
+                    Text(n.split(whereSeparator: \.isNewline).joined(separator: " · ")).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if let f = t.first_step, !f.isEmpty, !t.isDone {
+                    Label(f, systemImage: "arrow.turn.down.right").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                        .help("First step: \(f)")
                 }
                 if !t.isDone, chips {
                     HStack(spacing: 6) {
@@ -261,6 +266,14 @@ struct ListTaskEditor: View {
             }
             .font(.system(size: 12.5))
             TextField("First step", text: $firstStep).textFieldStyle(.plain).font(.system(size: 12.5))
+            if let qa = t.qa, !qa.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Your answers").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    ForEach(Array(qa.enumerated()), id: \.offset) { _, x in
+                        Text("\(x.q) \(x.a)").font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+            }
             if let steps = t.steps, !steps.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Steps (from the AI)").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
