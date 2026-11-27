@@ -5,7 +5,7 @@
     coach.py slot MINUTES [SKIP]  -> the soonest start (HH:MM) around the calendar and what's already planned (no AI)
     coach.py todos [today|tomorrow] -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI edits that day
     coach.py questions TASK_ID    -> up to 3 questions the AI would ask about a to-do list task, to plan it well
-    coach.py steps TASK_ID        -> a to-do list task broken into 5-10 minute steps, for a small-commitment day
+    coach.py breakdown TASK_ID    -> a to-do list task broken into 5-15 minute steps covering all of it (realistic minutes)
     coach.py test                 -> checks the AI set up in Settings > AI planner
 Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 The app rolls the day over (tomorrow's plan becomes today's) before it calls this script, so this script never does.
@@ -377,9 +377,10 @@ def questions_from_ai(task_id):
     return [" ".join(str(q).split())[:160] for q in qs if str(q).strip()][:3]
 
 
-def steps_context(task_id):
-    """The prompt for breaking one to-do list task into 5-10 minute steps (a small-commitment day), and its schema.
-    The answer uses the planner's item shape so Apple Intelligence can reuse the planner's fixed structure."""
+def breakdown_context(task_id):
+    """The prompt for breaking one to-do list task into 5-15 minute steps that cover all of it, and its schema. The
+    app turns the steps into its first step, its length (their total, padded) and the pieces of a cut-up day. The
+    answer uses the planner's item shape so Apple Intelligence can reuse the planner's fixed structure."""
     cfg = load_config()
     try:
         tasks = json.loads(TASKS.read_text()).get("tasks", [])
@@ -388,15 +389,19 @@ def steps_context(task_id):
     t = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id), None)
     if not t:
         raise ai.AIError("that task isn't on the list")
-    total = int(t.get("minutes") or 45)
     step = {"type": "object", "properties": {"ref": {"type": "string"}, "task": {"type": "string"}, "minutes": {"type": "integer"},
             "start": {"type": "string"}, "done": {"type": "boolean"}, "why": {"type": "string"}},
             "required": ["ref", "task", "minutes", "start", "done", "why"], "additionalProperties": False}
     schema = {"type": "object", "properties": {"items": {"type": "array", "items": step}, "reply": {"type": "string"}},
               "required": ["items", "reply"], "additionalProperties": False}
-    prompt = f"""Someone finds it hard to start anything today. Break this task from their to-do list into tiny steps they
-can do one at a time: each one concrete, physical and simple enough to start without thinking ("open the problem set
-PDF", "write 3 bullet points for the intro"), 5-10 minutes each, in the order they'd do them, about {total} minutes in all.
+    about = (cfg.get("about_me") or "").strip() or "no details given"
+    prompt = f"""Break this task from someone's to-do list into the steps they'd actually do, in order, covering ALL of it.
+About them: {about}
+- Each step concrete and simple enough to start without thinking ("open the problem set PDF and read question 1",
+  "write 3 bullet points for the intro"). The first step should be the easiest way in.
+- 5-15 minutes each, realistic for a student doing it carefully (not the best case). A big task gets many steps:
+  "review lectures 5-11" is seven lectures' worth.
+- At most 40 steps.
 Return them as items: ref "new", the step as task, its minutes, start "", done false, why "". reply: "ok".
 
 Task: {t.get("title", "")}
@@ -404,19 +409,19 @@ What they've said about it: {json.dumps(task_line(t))}"""
     return {"cfg": cfg, "prompt": prompt, "schema": schema}
 
 
-def steps_from_ai(task_id):
-    ctx = steps_context(task_id)
+def breakdown_from_ai(task_id):
+    ctx = breakdown_context(task_id)
     res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
     items = res.get("items") if isinstance(res, dict) else None
     if not isinstance(items, list):
         raise ai.AIError("the AI's answer wasn't a list of steps")
     out = []
-    for it in items[:24]:
+    for it in items[:40]:
         if not isinstance(it, dict):
             continue
         task = " ".join(str(it.get("task") or "").split())[:120]
         try:
-            minutes = min(max(int(it.get("minutes") or 10), 5), 15)
+            minutes = min(max(int(it.get("minutes") or 10), 5), 20)
         except (TypeError, ValueError):
             minutes = 10
         if task:
@@ -589,10 +594,10 @@ if __name__ == "__main__":
             print(json.dumps({"questions": questions_from_ai(tid)} if cmd == "questions" else {"prompt": questions_context(tid)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
-    elif cmd in ("steps", "sprompt"):   # sprompt: Apple Intelligence runs in the app, so just the prompt
+    elif cmd in ("breakdown", "bprompt"):   # bprompt: Apple Intelligence runs in the app, so just the prompt
         try:
             tid = sys.argv[2] if len(sys.argv) > 2 else ""
-            print(json.dumps({"steps": steps_from_ai(tid)} if cmd == "steps" else {"prompt": steps_context(tid)["prompt"]}))
+            print(json.dumps({"steps": breakdown_from_ai(tid)} if cmd == "breakdown" else {"prompt": breakdown_context(tid)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd == "slot":

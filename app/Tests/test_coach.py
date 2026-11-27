@@ -216,11 +216,13 @@ class PromptAndApply(unittest.TestCase):
         self.assertIn("hardest first", p)
         self.assertIn('"difficulty": "hard"', p)
 
-    def test_steps_prompt_is_about_the_task(self):
+    def test_breakdown_prompt_is_about_the_task(self):
         (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Econ final study", "minutes": 60}]}))
-        p = self.coach.steps_context("t1")["prompt"]
+        p = self.coach.breakdown_context("t1")["prompt"]
         self.assertIn("Econ final study", p)
-        self.assertIn("about 60 minutes", p)
+        self.assertIn("covering ALL of it", p)
+        with self.assertRaises(Exception):
+            self.coach.breakdown_context("nope")
 
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")

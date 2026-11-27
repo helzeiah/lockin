@@ -246,7 +246,14 @@ struct EngineTests {
             check(typed[0].title == "sell fridge" && typed[0].isStarred && typed[0].minutes == 30 && typed[0].due == day(1)
                   && typed[0].notes == "post it on marketplace", "parses star, length, due date and notes: \(typed[0])")
             check(typed[1].title == "policy memo" && typed[1].minutes == 90 && typed[1].due?.hasSuffix("-12-05") == true, "by 12/5 and 1.5h")
-            check(typed[2].due == nil && typed[2].minutes == nil && typed[2].openQuestions == [.due, .minutes, .firstStep], "a bare task gets asked the basics")
+            check(typed[2].due == nil && typed[2].minutes == nil && typed[2].openQuestions == [.due], "a bare task only gets asked when it's due")
+            // Lengths are estimated generously (× 1.75, in 5s), never asked; one you type wins.
+            check(Estimate.padded(60) == 105 && Estimate.padded(15) == 30, "padding: \(Estimate.padded(60))")
+            check(Estimate.minutes("course registration") == 30 && Estimate.minutes("review chem 110 pset") == 160
+                  && Estimate.minutes("if time, review chem 30 lectures 11,12,13,14") == 210, "estimates from the words")
+            check(Estimate.minutes("final econ exam study: lecture 15 onwards") == 265, "an exam is a big one: \(Estimate.minutes("final econ exam study: lecture 15 onwards"))")
+            check(typed[2].length == Estimate.minutes("clean up drive"), "no length: the estimate")
+            check(typed[0].estimated == false, "a typed length isn't an estimate")
             check(TaskList.parseLine("stand by the door")?.title == "stand by the door", "\"by\" without a date stays in the title")
             if let fri = TaskList.dueDate("fri") { check(cal.component(.weekday, from: fri) == 6 && fri >= base, "fri is this coming Friday") }
 
@@ -255,10 +262,13 @@ struct EngineTests {
             }
             let all = [task("later", due: 10), task("anytime"), task("star", star: true), task("soon", due: 2), task("today", due: 0), task("late", due: -2)]
             check(TaskList.ranked(all).map(\.id) == ["late", "today", "star", "soon", "later", "anytime"], "ranked: \(TaskList.ranked(all).map(\.id))")
-            let sug = TaskList.suggestions(all, planned: ["today"], day: .today)
-            check(sug.first?.task.id == "late" && sug.first?.picked == true && !sug.contains { $0.task.id == "today" }, "suggests what's due, minus what's planned")
-            check(sug.first { $0.task.id == "soon" }?.picked == false && sug.first { $0.task.id == "star" }?.picked == true, "starred starts ticked, later ones don't")
-            check(sug.first?.why == "Overdue 2 days", "says why: \(sug.first?.why ?? "")")
+            check(all.first { $0.id == "late" }?.dueLabel() == "Overdue 2 days", "due label")
+            // Filling free time: most important first, each with its break; a too-big one is passed over for a smaller one.
+            var sized = all
+            for i in sized.indices { sized[i].minutes = ["late": 60, "today": 30, "star": 90, "soon": 30][sized[i].id] ?? 45 }
+            check(TaskList.fill(sized, planned: ["today"], minutes: 100).map(\.id) == ["late", "soon"],
+                  "fills 100 min: late (60+5), star (90) doesn't fit, soon (30): \(TaskList.fill(sized, planned: ["today"], minutes: 100).map(\.id))")
+            check(TaskList.fill(sized, planned: [], minutes: 0).isEmpty, "no room, nothing added")
             let morning = cal.date(bySettingHour: 10, minute: 0, second: 0, of: base)!, evening = cal.date(bySettingHour: 19, minute: 0, second: 0, of: base)!
             check(TaskList.nudge(all, today: [], tomorrow: [], nudged: [], now: morning)?.task.id == "late", "nudges the overdue one first")
             check(TaskList.nudge(all, today: ["late", "today"], tomorrow: [], nudged: [], now: morning) == nil, "nothing to nudge once it's planned")
@@ -333,6 +343,15 @@ struct EngineTests {
             let small = TodoDoc.cut(essay, .small, firstStep: "open the doc")
             check(small.map(\.task) == ["Essay: open the doc", "Essay (2/3)", "Essay (3/3)"] && small.map(\.minutes) == [10, 10, 10]
                   && Set(small.compactMap(\.group)) == ["e"] && small[0].id == "e", "small pieces: \(small.map(\.task))")
+            // The AI's steps become the pieces: grouped up to the level's top, scaled to the task's generous length.
+            let steps = [ListTask.Step(task: "Open the slides", minutes: 5), ListTask.Step(task: "Read lecture 15", minutes: 15),
+                         ListTask.Step(task: "Make flashcards", minutes: 15), ListTask.Step(task: "Do the practice set", minutes: 15)]
+            let big = Commitment.large.group(steps, total: 90), tiny = Commitment.small.group(steps, total: 50)
+            check(big.count == 1 && big[0].task == "Open the slides …" && big[0].minutes == 90, "large: one block: \(big)")
+            check(tiny.count >= 5 && tiny.allSatisfy { $0.minutes <= 10 } && tiny[0].task == "Open the slides", "small: step-sized pieces: \(tiny)")
+            let mid = Commitment.medium.group(steps, total: 87)
+            check(mid.map(\.task) == ["Open the slides …", "Make flashcards", "Do the practice set"] && mid.allSatisfy { $0.minutes <= 45 },
+                  "medium groups steps up to 45 min: \(mid)")
             let named = TodoDoc.cut(essay, .small, steps: [("Open the doc", 5), ("Write the first heading", 10)])
             check(named.map(\.task) == ["Open the doc", "Write the first heading"] && named.map(\.minutes) == [5, 10], "AI steps name the pieces")
 

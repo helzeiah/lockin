@@ -132,10 +132,15 @@ struct TodayView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            DayShapeCard(day: day).padding(.horizontal, 28).padding(.bottom, 12)
-            ListSuggestions(day: day).padding(.horizontal, 28).padding(.bottom, 12)
             if day == .today, e.block != nil { SessionBanner().padding(.horizontal, 22).padding(.bottom, 10) }
-            if entries.isEmpty { empty } else { timeline }
+            // The day's questions scroll with the plan, so the window never grows taller than the screen.
+            ScrollView {
+                VStack(spacing: 0) {
+                    DayShapeCard(day: day).padding(.horizontal, 12).padding(.bottom, 12)
+                    if entries.isEmpty { empty } else { timeline }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 12)
+            }
             if day == .today && !e.backlog.isEmpty { backlogSection }
             composer
         }
@@ -187,33 +192,28 @@ struct TodayView: View {
     // MARK: timeline
 
     private var timeline: some View {
-        ScrollView {
-            LazyVStack(spacing: 2) {
-                let nextId = day == .today ? e.nextTodo?.id : nil
-                ForEach(entries, id: \.id) { entry in
-                    switch entry {
-                    case .todo(let t):
-                        if editingId == t.id { TodoEditor(t: t, day: day) { editingId = nil }.padding(.vertical, 4) }
-                        else { TodoRow(t: t, day: day, isNext: t.id == nextId, hoverId: $hoverId, editingId: $editingId) }
-                    case .event(let ev): EventRow(ev: ev)
-                    }
+        LazyVStack(spacing: 2) {
+            let nextId = day == .today ? e.nextTodo?.id : nil
+            ForEach(entries, id: \.id) { entry in
+                switch entry {
+                case .todo(let t):
+                    if editingId == t.id { TodoEditor(t: t, day: day) { editingId = nil }.padding(.vertical, 4) }
+                    else { TodoRow(t: t, day: day, isNext: t.id == nextId, hoverId: $hoverId, editingId: $editingId) }
+                case .event(let ev): EventRow(ev: ev)
                 }
             }
-            .padding(.horizontal, 16).padding(.bottom, 12)
         }
     }
 
     private var empty: some View {
         VStack(spacing: 10) {
-            Spacer()
             Image(systemName: day == .today ? "sun.max" : "moon.stars").font(.system(size: 30, weight: .light)).foregroundStyle(.secondary)
             Text(day == .today ? "Nothing planned yet" : "Plan tomorrow tonight").font(.system(size: 16, weight: .semibold))
             Text(day == .today ? "Type what you'll lock in on below, all in one line.\nlockin picks the times and the apps for each one."
                                : "Whatever you add here is waiting on your morning screen,\nso the day starts with a plan instead of a blank page.")
                 .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Spacer()
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 
     // MARK: backlog
@@ -285,6 +285,10 @@ struct TodayView: View {
             HStack {
                 summary
                 Spacer()
+                if e.listTasks.contains(where: { t in !t.isDone && !items.contains { $0.task_id == t.id } }) {
+                    Button("Fill from to-do list") { e.fillFromList(day) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Theme.accent)
+                        .disabled(e.planning).help("Fill the free time with the most important tasks on your to-do list")
+                }
                 if !items.isEmpty { Button("Clear \(day == .today ? "today" : "tomorrow")") { e.clearDay(day) }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary) }
             }
         }
@@ -804,7 +808,7 @@ struct DayShapeCard: View {
                 .font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
             ForEach($breaks) { $b in
                 HStack(spacing: 8) {
-                    Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                    Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 116, alignment: .leading)
                     DatePicker("", selection: $b.start, displayedComponents: .hourAndMinute).labelsHidden()
                     Picker("", selection: $b.minutes) {
                         ForEach([15, 30, 45, 60, 90, 120], id: \.self) { Text(fmtMinutes($0)).tag($0) }
@@ -819,14 +823,15 @@ struct DayShapeCard: View {
             }
             .buttonStyle(.plain).foregroundStyle(Theme.accent)
             HStack(spacing: 8) {
-                Toggle("Finish work at", isOn: $hasFinish).toggleStyle(.checkbox).font(.system(size: 12.5)).frame(width: 96, alignment: .leading)
+                Toggle("Finish work at", isOn: $hasFinish).toggleStyle(.checkbox).font(.system(size: 12.5)).fixedSize().frame(width: 116, alignment: .leading)
                 DatePicker("", selection: $finish, displayedComponents: .hourAndMinute).labelsHidden().disabled(!hasFinish)
             }
             HStack {
                 if shape == nil { Button("Skip") { e.setShape(DayShape(), day: day) }.buttonStyle(SecondaryButtonStyle()) }
                 else { Button("Cancel") { editing = false }.buttonStyle(SecondaryButtonStyle()) }
                 Spacer()
-                Button("Fit my plan to this", action: save).buttonStyle(PrimaryButtonStyle())
+                Button(day == .today ? "Plan my day" : "Plan tomorrow", action: save).buttonStyle(PrimaryButtonStyle())
+                    .help("Fits your plan to this and fills the free time from your to-do list")
             }
             .controlSize(.small)
         }
@@ -849,6 +854,7 @@ struct DayShapeCard: View {
     private func save() {
         let list = breaks.sorted { $0.start < $1.start }.map { DayShape.Break(start: hhmm($0.start), minutes: $0.minutes) }
         e.setShape(DayShape(breaks: list, finish: hasFinish ? hhmm(finish) : nil, level: level), day: day)
+        e.fillFromList(day)   // the day gets built from your to-do list, around what's already planned
         editing = false
     }
 }

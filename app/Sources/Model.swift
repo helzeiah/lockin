@@ -454,7 +454,7 @@ func runCoach(_ args: [String], input: String? = nil) -> String {
                "HOME": home, "USER": user, "LOGNAME": user, "LANG": "en_US.UTF-8", "TERM": "xterm",
                "FOCUS_DATA": Paths.dir.path, "FOCUS_CALEVENTS": Paths.calevents.path, "FOCUS_TODAY": today(),
                "PYTHONDONTWRITEBYTECODE": "1"]   // never write __pycache__ into the signed app bundle
-    if ["todos", "test", "questions", "steps"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
+    if ["todos", "test", "questions", "breakdown"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
     p.environment = env
     let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
     let inp = Pipe(); p.standardInput = inp

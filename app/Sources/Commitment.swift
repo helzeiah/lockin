@@ -22,6 +22,25 @@ enum Commitment: String, CaseIterable, Codable {
         }
     }
 
+    /// A task's steps (the AI's breakdown) made into sessions for this level, `total` minutes in all: one after
+    /// another, as many as fit under the top of the range together, each named by its first step ("…" when it holds
+    /// more). Step lengths are scaled to `total`, so the pieces keep the task's generous length.
+    func group(_ steps: [ListTask.Step], total: Int) -> [(task: String, minutes: Int)] {
+        let sum = steps.reduce(0) { $0 + max(1, $1.minutes) }
+        guard sum > 0 else { return [] }
+        let scale = Double(total) / Double(sum)
+        var out: [(task: String, minutes: Int, count: Int)] = []
+        for s in steps {
+            let m = max(1, Int((Double(max(1, s.minutes)) * scale).rounded()))
+            if let last = out.last, last.minutes + m <= range.upperBound {
+                out[out.count - 1] = (last.task, last.minutes + m, last.count + 1)
+            } else {
+                out += pieces(m).map { (s.task, $0, 1) }   // a step too long for the level is cut too
+            }
+        }
+        return out.map { ($0.count > 1 ? $0.task + " …" : $0.task, max(5, Int((Double($0.minutes) / 5).rounded()) * 5)) }
+    }
+
     /// A task this long cut into sessions: as few as fit under the top of the range, as even as possible, in
     /// 5-minute steps. A task already short enough stays whole.
     func pieces(_ minutes: Int) -> [Int] {

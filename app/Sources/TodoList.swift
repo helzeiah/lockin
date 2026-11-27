@@ -4,13 +4,16 @@ import Foundation
 /// puts it on that day's plan as a session (Todo.task_id points back here).
 struct ListTask: Codable, Identifiable, Hashable {
     struct QA: Codable, Hashable { var q: String; var a: String }
+    struct Step: Codable, Hashable { var task: String; var minutes: Int }
 
     var id: String
     var title: String
     var notes: String? = ""
     var due: String? = nil           // "yyyy-MM-dd"; "" = you said it has no due date; nil = not asked yet
-    var minutes: Int? = nil          // how long you think it takes; nil = not asked yet
-    var first_step: String? = nil    // "" = skipped; nil = not asked yet
+    var minutes: Int? = nil          // how long it takes, generously; nil = not estimated yet (see length)
+    var estimated: Bool? = nil       // minutes is lockin's or the AI's estimate, not a length you set
+    var first_step: String? = nil
+    var steps: [Step]? = nil         // the AI's breakdown into 5-15 minute steps; nil = not broken down yet
     var starred: Bool? = false
     var done: String? = nil          // the day you finished it
     var created: String? = nil       // the day you added it
@@ -20,6 +23,8 @@ struct ListTask: Codable, Identifiable, Hashable {
     var effort: Int? = nil           // how hard it is to get into: 1 easy, 2 medium, 3 hard; nil = judged by length
 
     var isDone: Bool { done != nil }
+    /// How long to plan for it: its length, else a generous guess from its words (see Estimate).
+    var length: Int { minutes ?? Estimate.minutes(title, notes: notes ?? "") }
     static let effortNames = [1: "Easy", 2: "Medium", 3: "Hard"]
     var isStarred: Bool { starred ?? false }
     var dueDate: Date? { due.flatMap { $0.isEmpty ? nil : DateFormatter.ymd.date(from: $0) } }
@@ -42,11 +47,12 @@ struct ListTask: Codable, Identifiable, Hashable {
         }
     }
 
-    /// The built-in questions it still needs answered, in the order they're asked.
-    enum Question: String { case due, minutes, firstStep }
+    /// The built-in questions it still needs answered. Only when it's due: its length is estimated and its first step
+    /// comes from the AI's breakdown.
+    enum Question: String { case due }
     var openQuestions: [Question] {
         guard !(skipped ?? false), !isDone else { return [] }
-        return (due == nil ? [.due] : []) + (minutes == nil ? [.minutes] : []) + (first_step == nil ? [.firstStep] : [])
+        return due == nil ? [.due] : []
     }
     var needsAnswers: Bool { !openQuestions.isEmpty || !(ai_questions ?? []).isEmpty }
 
@@ -87,17 +93,17 @@ enum TaskList {
         return tasks.filter { !$0.isDone }.sorted { key($0) < key($1) }
     }
 
-    /// What to offer when you plan a day: the top open tasks not already on it, with why, and whether they start
-    /// ticked (overdue, due by that day, or starred).
-    static func suggestions(_ tasks: [ListTask], planned: Set<String>, day: PlanDay, now: Date = Date(), limit: Int = 6)
-        -> [(task: ListTask, why: String, picked: Bool)] {
-        let offset = day == .today ? 0 : 1
-        return ranked(tasks, now: now).filter { !planned.contains($0.id) }.prefix(limit).map { t in
-            let n = t.daysLeft(from: now)
-            let urgent = n.map { $0 <= offset } ?? false
-            let why = !t.dueLabel(from: now).isEmpty ? t.dueLabel(from: now) : t.isStarred ? "Starred" : "On your list"
-            return (t, why, urgent || t.isStarred)
+    /// What fits in `minutes` of free time, most important first (see ranked), with the break after each. A task
+    /// that doesn't fit is passed over for a smaller one further down. Tasks without a length count as 45 minutes.
+    static func fill(_ tasks: [ListTask], planned: Set<String>, minutes: Int, breakAfter: (Int) -> Int = { _ in 5 },
+                     now: Date = Date()) -> [ListTask] {
+        var left = minutes, out: [ListTask] = []
+        for t in ranked(tasks, now: now) where !planned.contains(t.id) {
+            let m = t.length
+            guard m <= left else { continue }   // the day's last session needs no break after it
+            out.append(t); left -= m + breakAfter(m)
         }
+        return out
     }
 
     /// The task worth a nudge right now, if any: due today (or overdue) and not on today's plan; in the evening, due
@@ -145,7 +151,7 @@ enum TaskList {
             let num = Double(m.prefix { "0123456789.".contains($0) }) ?? 0
             let hours = m.lowercased().contains("h")
             let minutes = Int((hours ? num * 60 : num).rounded())
-            if (5...600).contains(minutes) { t.minutes = minutes; s.replaceSubrange(r, with: " ") }
+            if (5...600).contains(minutes) { t.minutes = minutes; t.estimated = false; s.replaceSubrange(r, with: " ") }
         }
         // How hard: "easy", "medium" or "hard" as the last word.
         if let r = s.range(of: #"(?i)\s(easy|medium|hard)\s*$"#, options: .regularExpression) {
@@ -186,5 +192,34 @@ enum TaskList {
         let year = cal.component(.year, from: base)
         guard let d = cal.date(from: DateComponents(year: year, month: month, day: day)) else { return nil }
         return d < base ? cal.date(byAdding: .year, value: 1, to: d) : d
+    }
+}
+
+/// Generous task lengths: how long something like it really takes, times `generosity`, so a plan built from them
+/// holds up. The AI's estimates get the same padding (see Engine.breakDown).
+enum Estimate {
+    static let generosity = 1.75
+
+    /// Padded and rounded up to 5 minutes.
+    static func padded(_ realistic: Int) -> Int { max(10, Int((Double(realistic) * generosity / 5).rounded(.up)) * 5) }
+
+    /// A guess from the words: "email" is quick, a pset or an essay takes a while, "lectures 11,12,13,14" is four
+    /// lectures. Already padded.
+    static func minutes(_ title: String, notes: String = "") -> Int {
+        let t = (title + " " + notes).lowercased()
+        func has(_ words: [String]) -> Bool { words.contains { t.range(of: "\\b\($0)", options: .regularExpression) != nil } }
+        // "lectures 11,12,13,14" or "lecture 5,6,7": that many lectures.
+        if has(["lecture"]), let r = t.range(of: #"lectures?\s+([\d.,\s-]+)"#, options: .regularExpression) {
+            let count = t[r].split(whereSeparator: { !$0.isNumber }).count
+            if count > 1 { return padded(count * 30) }
+        }
+        let realistic: Int
+        if has(["final", "exam", "midterm", "study for"]) { realistic = 150 }
+        else if has(["pset", "problem set", "homework", "assignment", "practice", "essay", "paper", "memo", "statement", "application", "thesis", "project"]) { realistic = 90 }
+        else if has(["review", "read", "lecture", "write", "draft", "study", "notes", "plan"]) { realistic = 45 }
+        else if has(["resume", "cv", "edit", "update", "clean", "organize", "move", "sell"]) { realistic = 30 }
+        else if has(["email", "reply", "text", "call", "register", "registration", "pay", "book", "schedule", "submit", "sign", "order"]) { realistic = 15 }
+        else { realistic = 30 }
+        return padded(realistic)
     }
 }

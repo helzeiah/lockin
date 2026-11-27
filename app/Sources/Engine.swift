@@ -70,6 +70,7 @@ final class Engine: ObservableObject {
     @Published var listTasks: [ListTask] = []  // the running to-do list
     @Published var askingAI: String?           // the list task the AI is thinking up questions for
     @Published var listError: String?
+    @Published var breakingDown: String?       // the list task the AI is breaking into steps
     @Published var events: [CalEvent] = []
     private var lastDay = today()
     @Published var planning = false
@@ -1144,7 +1145,7 @@ final class Engine: ObservableObject {
         if minuteCount % 10 == 0 { refreshEvents() }
         if block?.kind == "focus" { persist() }
         todayMinutes = finishedToday()
-        catchUp(); morningCheck(); duePlanned(); dueEvents(); dueNudge(); idleNudge()
+        catchUp(); morningCheck(); duePlanned(); dueEvents(); dueNudge(); idleNudge(); breakDownNext()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
         if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }

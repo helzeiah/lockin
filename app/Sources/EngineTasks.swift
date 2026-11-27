@@ -25,8 +25,13 @@ extension Engine {
     /// Adds what you typed or pasted (see TaskList.parse), newest on top, with `effort` where you didn't type one.
     /// Returns the new tasks.
     @discardableResult func addListTasks(_ text: String, effort: Int? = nil) -> [ListTask] {
-        let new = TaskList.parse(text).map { t in var t = t; t.effort = t.effort ?? effort; return t }
-        if !new.isEmpty { editList { $0.insert(contentsOf: new, at: 0) } }
+        let new = TaskList.parse(text).map { t in
+            var t = t
+            t.effort = t.effort ?? effort
+            if t.minutes == nil { t.minutes = Estimate.minutes(t.title, notes: t.notes ?? ""); t.estimated = true }   // until the AI's is in
+            return t
+        }
+        if !new.isEmpty { editList { $0.insert(contentsOf: new, at: 0) }; breakDownNext() }
         return new
     }
 
@@ -44,7 +49,7 @@ extension Engine {
     }
 
     /// Puts list tasks on a day's plan, then arranges the day (see arrangeDay). Their apps come from their words, the
-    /// same as anything you type in. On a small day with the AI planner on, the AI breaks each one into named steps.
+    /// same as anything you type in. With a level set, a task the AI broke into steps becomes pieces made of them.
     func planFromList(_ tasks: [ListTask], day: PlanDay) {
         let fresh = tasks.filter { t in !t.isDone && !list(day).contains { $0.task_id == t.id } }
         guard !fresh.isEmpty else { return }
@@ -55,11 +60,12 @@ extension Engine {
             var added: [Todo] = []
             for t in fresh {
                 let match = TaskMatch.apps(for: t.title, cfg: cfg, history: history)
-                let item = Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: t.minutes ?? 45, start: "",
+                let item = Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: t.length, start: "",
                                 apps: match.apps, task_id: t.id, effort: t.effort)
-                var steps: [(task: String, minutes: Int)] = []
-                if level == .small, cfg.aiOn, item.minutes > Commitment.small.range.upperBound { steps = await Engine.aiSteps(t, cfg: cfg) }
-                added += level.map { TodoDoc.cut(item, $0, steps: steps, firstStep: t.first_step) } ?? [item]
+                added += level.map { l in
+                    let steps = l.group(t.steps ?? [], total: t.length)
+                    return TodoDoc.cut(item, l, steps: steps.count > 1 ? steps : [], firstStep: t.first_step)
+                } ?? [item]
             }
             let pieces = added
             await MainActor.run {
@@ -98,28 +104,83 @@ extension Engine {
         d.save(); reloadTodos()
     }
 
-    /// The AI's 5-10 minute steps for a list task, for a small day ([] if it can't).
-    nonisolated static func aiSteps(_ t: ListTask, cfg: Config) async -> [(task: String, minutes: Int)] {
+    // MARK: the AI's breakdown
+
+    /// With the AI planner on, every open task gets broken down once, in the background, one at a time: 5-15 minute
+    /// steps, its first step, and a generous length (the AI's realistic total × Estimate.generosity, unless you set
+    /// one). Runs after a task is added and every minute until the list is done.
+    func breakDownNext() {
+        guard cfg.aiOn, breakingDown == nil,
+              let t = listTasks.first(where: { !$0.isDone && $0.steps == nil && !($0.skipped ?? false) }) else { return }
+        breakingDown = t.id
+        let cfg = self.cfg
+        Task.detached(priority: .utility) {
+            let steps = await Engine.aiBreakdown(t, cfg: cfg)
+            await MainActor.run {
+                self.breakingDown = nil
+                self.updateListTask(t.id) { x in
+                    x.steps = steps   // [] when the AI couldn't: tried, so it isn't asked again and again
+                    guard !steps.isEmpty else { return }
+                    if (x.first_step ?? "").isEmpty { x.first_step = steps[0].task }
+                    if x.minutes == nil || x.estimated == true {
+                        x.minutes = Estimate.padded(steps.reduce(0) { $0 + $1.minutes }); x.estimated = true
+                    }
+                }
+                self.breakDownNext()
+            }
+        }
+    }
+
+    /// The AI's steps for a task, 5-15 minutes each, covering all of it ([] if it can't).
+    nonisolated static func aiBreakdown(_ t: ListTask, cfg: Config) async -> [ListTask.Step] {
         var items: [[String: Any]] = []
         if cfg.ai?.provider == "apple" {   // Apple Intelligence runs in the app; the helper writes the prompt
-            let p = (try? JSONSerialization.jsonObject(with: Data(runCoach(["sprompt", t.id]).utf8))) as? [String: Any]
+            let p = (try? JSONSerialization.jsonObject(with: Data(runCoach(["bprompt", t.id]).utf8))) as? [String: Any]
             guard let prompt = p?["prompt"] as? String, let answer = try? await AppleAI.plan(prompt: prompt) else { return [] }
             items = ((try? JSONSerialization.jsonObject(with: Data(answer.utf8))) as? [String: Any])?["items"] as? [[String: Any]] ?? []
         } else {
-            items = ((try? JSONSerialization.jsonObject(with: Data(runCoach(["steps", t.id]).utf8))) as? [String: Any])?["steps"] as? [[String: Any]] ?? []
+            items = ((try? JSONSerialization.jsonObject(with: Data(runCoach(["breakdown", t.id]).utf8))) as? [String: Any])?["steps"] as? [[String: Any]] ?? []
         }
-        return items.prefix(24).compactMap { s in
+        return items.prefix(40).compactMap { s in
             let name = String((s["task"] as? String ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(120))
             let m = (s["minutes"] as? Int) ?? Int(s["minutes"] as? Double ?? 10)
-            return name.isEmpty ? nil : (name, min(max(m, 5), 15))
+            return name.isEmpty ? nil : ListTask.Step(task: name, minutes: min(max(m, 5), 20))
         }
+    }
+
+    /// Builds the day from your to-do list: its free time (see freeMinutes) filled with the most important tasks, then
+    /// cut to the day's level and arranged hardest first. With the AI planner on, the AI makes the plan from the list.
+    func fillFromList(_ day: PlanDay) {
+        if cfg.aiOn {
+            sendToPlanner("Plan \(day == .today ? "the rest of today" : "tomorrow") from my to-do list: fill the free time with what matters most, hardest first.", day: day)
+            return
+        }
+        let picks = TaskList.fill(listTasks, planned: Set(list(day).compactMap(\.task_id)), minutes: freeMinutes(day), breakAfter: cfg.breakAfter)
+        if picks.isEmpty {
+            showPlanNote(listTasks.contains { !$0.isDone } ? "Your day's already full" : "Your to-do list is empty")
+            return
+        }
+        planFromList(picks, day: day)
+    }
+
+    /// The minutes a day still has for more sessions: from now (tomorrow: the start of your active hours) to your
+    /// finish time, less calendar events, breaks, and what's already planned with its breaks.
+    func freeMinutes(_ day: PlanDay) -> Int {
+        let (now, busy, end) = bounds(day)
+        let first = (cfg.active_hours ?? [8, 23])[0]
+        let start = day == .today ? planAnchor : (Calendar.current.date(bySettingHour: first, minute: 0, second: 0, of: now) ?? now)
+        guard end > start else { return 0 }
+        var free = end.timeIntervalSince(start) / 60
+        for (a, b) in busy { free -= max(0, min(b, end).timeIntervalSince(max(a, start)) / 60) }
+        for t in list(day) where !t.isDone && t.id != block?.todoId { free -= Double(t.left + cfg.breakAfter(t.left)) }
+        return max(0, Int(free))
     }
 
     /// Locks in on a list task right now: its session on today's plan, else a new one starting now.
     func startFromList(_ t: ListTask) {
         if let p = todos.first(where: { $0.task_id == t.id && !$0.isDone }) { startTodo(p); return }
         let match = TaskMatch.apps(for: t.title, cfg: cfg)
-        let item = Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: t.minutes ?? 45, start: hhmm(Date()),
+        let item = Todo(id: Todo.newId(), task: t.title, block: match.rule ?? "", minutes: t.length, start: hhmm(Date()),
                         apps: match.apps, task_id: t.id)
         var d = TodoDoc.load()
         d.items.append(item); d.sortItems(); d.save(); reloadTodos()

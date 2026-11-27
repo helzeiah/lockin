@@ -165,7 +165,8 @@ struct ListTaskRow: View {
                 if !t.isDone, chips {
                     HStack(spacing: 6) {
                         if !t.dueLabel().isEmpty { chip(t.dueLabel(), icon: "clock", tint: dueTint) }
-                        if let m = t.minutes { chip(fmtMinutes(m), icon: "hourglass", tint: .secondary) }
+                        chip((t.minutes == nil || t.estimated == true ? "~" : "") + fmtMinutes(t.length), icon: "hourglass", tint: .secondary)
+                            .help(t.minutes == nil || t.estimated == true ? "Estimated generously. Click the task to set it yourself" : "How long it takes")
                         effortChip
                         if onToday { chip("On today's plan", icon: "sun.max", tint: Theme.accent) }
                     }
@@ -196,7 +197,7 @@ struct ListTaskRow: View {
         .animation(.easeOut(duration: 0.12), value: hoverId)
     }
 
-    private var chips: Bool { !t.dueLabel().isEmpty || t.minutes != nil || onToday || t.effort != nil || hover }
+    private var chips: Bool { true }
 
     /// Its difficulty, click to change (only on hover while it isn't set).
     @ViewBuilder private var effortChip: some View {
@@ -248,7 +249,7 @@ struct ListTaskEditor: View {
                 Toggle("Due", isOn: $hasDue).toggleStyle(.checkbox)
                 DatePicker("", selection: $due, displayedComponents: .date).labelsHidden().disabled(!hasDue)
                 Picker("Length", selection: $minutes) {
-                    Text("Not sure").tag(0)
+                    Text("Estimate (~\(fmtMinutes(t.minutes ?? t.length)))").tag(0)
                     ForEach([15, 30, 45, 60, 90, 120, 180, 240], id: \.self) { Text(fmtMinutes($0)).tag($0) }
                 }
                 .frame(width: 170)
@@ -260,6 +261,16 @@ struct ListTaskEditor: View {
             }
             .font(.system(size: 12.5))
             TextField("First step", text: $firstStep).textFieldStyle(.plain).font(.system(size: 12.5))
+            if let steps = t.steps, !steps.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Steps (from the AI)").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
+                        Text("\(i + 1). \(s.task) · \(s.minutes) min").font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+            } else if e.breakingDown == t.id {
+                HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Breaking it into steps…").font(.system(size: 11.5)).foregroundStyle(.secondary) }
+            }
             HStack {
                 Button("Delete") { e.deleteListTask(t.id); onClose() }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Theme.danger)
                 Spacer()
@@ -272,7 +283,7 @@ struct ListTaskEditor: View {
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
         .onAppear {
             title = t.title; notes = t.notes ?? ""; hasDue = t.dueDate != nil; due = t.dueDate ?? Stats.today
-            minutes = t.minutes ?? 0; firstStep = t.first_step ?? ""; effort = t.effort ?? 0
+            minutes = t.estimated == true ? 0 : (t.minutes ?? 0); firstStep = t.first_step ?? ""; effort = t.effort ?? 0
         }
     }
 
@@ -283,7 +294,7 @@ struct ListTaskEditor: View {
             x.title = name
             x.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
             x.due = hasDue ? DateFormatter.ymd.string(from: due) : (x.due == nil ? nil : "")
-            x.minutes = minutes > 0 ? minutes : x.minutes
+            if minutes > 0 { x.minutes = minutes; x.estimated = false }   // a length you set replaces the estimate
             x.effort = effort > 0 ? effort : nil
             let step = firstStep.trimmingCharacters(in: .whitespaces)
             x.first_step = step.isEmpty ? x.first_step : step
@@ -292,8 +303,8 @@ struct ListTaskEditor: View {
     }
 }
 
-/// lockin's questions about a task, one at a time: when it's due, how long it takes, the first step, then (with the
-/// AI planner on) a few questions about that task in particular. Every one can be skipped.
+/// lockin's questions about a task, one at a time: when it's due, then (with the AI planner on) a few questions about
+/// that task in particular. Every one can be skipped. Its length and first step aren't asked: they're estimated.
 struct TaskQuestionsCard: View {
     @EnvironmentObject var e: Engine
     let t: ListTask
@@ -346,18 +357,6 @@ struct TaskQuestionsCard: View {
                     }
                 Button("No due date") { e.updateListTask(t.id) { $0.due = "" } }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-        case .minutes?:
-            question("About how long will it take?")
-            HStack(spacing: 6) {
-                ForEach([15, 30, 45, 60, 90, 120, 180], id: \.self) { m in
-                    Button(fmtMinutes(m)) { e.updateListTask(t.id) { $0.minutes = m } }.buttonStyle(SecondaryButtonStyle())
-                }
-                Button("Not sure") { e.updateListTask(t.id) { $0.minutes = 45 } }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
-                    .help("Plans it as 45 minutes; change it any time")
-            }
-        case .firstStep?:
-            question("What's the very first step?")
-            answerField("e.g. open the listing site and take 3 photos") { a in e.updateListTask(t.id) { $0.first_step = a } }
         case nil:
             if let q = aiQuestion {
                 question(q)
@@ -396,60 +395,5 @@ struct TaskQuestionsCard: View {
     private func setDue(_ d: Date?) {
         guard let d else { return }
         e.updateListTask(t.id) { $0.due = DateFormatter.ymd.string(from: d) }
-    }
-}
-
-/// "From your to-do list" when you plan a day: the tasks that matter most and aren't on it yet. Overdue, due-by-then
-/// and starred ones start ticked; you pick, and they get times.
-struct ListSuggestions: View {
-    @EnvironmentObject var e: Engine
-    let day: PlanDay
-    @State private var picked = Set<String>()
-    @State private var open: Bool?
-
-    private var items: [(task: ListTask, why: String, picked: Bool)] {
-        TaskList.suggestions(e.listTasks, planned: Set(e.list(day).compactMap(\.task_id)), day: day)
-    }
-
-    var body: some View {
-        let s = items
-        if !s.isEmpty {
-            let expanded = open ?? (s.contains { $0.picked } || e.list(day).isEmpty)
-            VStack(alignment: .leading, spacing: 6) {
-                Button { withAnimation(.easeOut(duration: 0.15)) { open = !expanded } } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).rotationEffect(.degrees(expanded ? 90 : 0))
-                        Text("From your to-do list").font(.system(size: 12.5, weight: .semibold))
-                        let urgent = s.filter { $0.picked }.count
-                        if urgent > 0 { Text("\(urgent) due or starred").font(.system(size: 11.5)).foregroundStyle(.secondary) }
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                if expanded {
-                    ForEach(s, id: \.task.id) { item in
-                        Toggle(isOn: Binding(get: { picked.contains(item.task.id) },
-                                             set: { if $0 { picked.insert(item.task.id) } else { picked.remove(item.task.id) } })) {
-                            HStack(spacing: 8) {
-                                Text(item.task.title).font(.system(size: 13)).lineLimit(1)
-                                Spacer(minLength: 6)
-                                Text(item.why).font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle((item.task.daysLeft() ?? 1) < 0 ? Theme.danger : (item.task.daysLeft() ?? 9) <= 1 ? Theme.flame : .secondary)
-                                Text(fmtMinutes(item.task.minutes ?? 45)).font(.system(size: 11.5)).foregroundStyle(.tertiary).monospacedDigit()
-                            }
-                        }
-                        .toggleStyle(.checkbox)
-                    }
-                    let chosen = s.filter { picked.contains($0.task.id) }.map(\.task)
-                    HStack {
-                        Spacer()
-                        Button("Add \(chosen.count) to \(day == .today ? "today" : "tomorrow")") { e.planFromList(chosen, day: day); picked = [] }
-                            .buttonStyle(PrimaryButtonStyle()).disabled(chosen.isEmpty || e.planning)
-                    }
-                }
-            }
-            .task(id: s.map(\.task.id)) { picked = Set(s.filter(\.picked).map(\.task.id)) }
-        }
     }
 }
