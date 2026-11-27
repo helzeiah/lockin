@@ -810,10 +810,10 @@ struct DayShapeCard: View {
                 HStack(spacing: 8) {
                     Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 116, alignment: .leading)
                     DatePicker("", selection: $b.start, displayedComponents: .hourAndMinute).labelsHidden()
-                    Picker("", selection: $b.minutes) {
-                        ForEach([15, 30, 45, 60, 90, 120], id: \.self) { Text(fmtMinutes($0)).tag($0) }
+                    Picker("", selection: $b.minutes) {   // up to an afternoon off (a movie with friends, then back to it)
+                        ForEach([15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360], id: \.self) { Text(fmtMinutes($0)).tag($0) }
                     }
-                    .labelsHidden().frame(width: 90)
+                    .labelsHidden().frame(width: 120)
                     Button { breaks.removeAll { $0.id == b.id } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
                         .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove this break")
                 }
