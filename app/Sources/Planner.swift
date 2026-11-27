@@ -133,6 +133,7 @@ struct TodayView: View {
         VStack(spacing: 0) {
             header
             DayShapeCard(day: day).padding(.horizontal, 28).padding(.bottom, 12)
+            ListSuggestions(day: day).padding(.horizontal, 28).padding(.bottom, 12)
             if day == .today, e.block != nil { SessionBanner().padding(.horizontal, 22).padding(.bottom, 10) }
             if entries.isEmpty { empty } else { timeline }
             if day == .today && !e.backlog.isEmpty { backlogSection }

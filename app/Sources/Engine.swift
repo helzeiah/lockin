@@ -7,6 +7,7 @@ enum CardAction: Hashable {
     case planTomorrow
     case startTodo(String), snoozeTodo(String), equipSkin(String)
     case lockInEvent(String), skipEvent(String), neverEvent(String)
+    case planListTask(String), planListTaskTomorrow(String), startListTask(String)   // a to-do list task, by id
 }
 
 /// A short message that drops out of the notch for a few seconds (check-ins). Never steals focus, never needs a click.
@@ -66,6 +67,9 @@ final class Engine: ObservableObject {
     @Published var backlog: [Todo] = []
     @Published var todayShape: DayShape?       // today's breaks and finish time, once you've answered
     @Published var tomorrowShape: DayShape?
+    @Published var listTasks: [ListTask] = []  // the running to-do list
+    @Published var askingAI: String?           // the list task the AI is thinking up questions for
+    @Published var listError: String?
     @Published var events: [CalEvent] = []
     private var lastDay = today()
     @Published var planning = false
@@ -203,6 +207,7 @@ final class Engine: ObservableObject {
         backlog = d.backlog ?? []
         todayShape = d.shape
         tomorrowShape = d.tomorrow_shape
+        syncListFromPlan(d)
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? todos : tomorrow }
     func shape(_ day: PlanDay) -> DayShape? { day == .today ? todayShape : tomorrowShape }
@@ -681,6 +686,9 @@ final class Engine: ObservableObject {
                 updateTodo(id, start: hhmm(Date().addingTimeInterval(600)))
             }
         case .equipSkin(let id): Skin.equip(id)
+        case .planListTask(let id): if let t = listTasks.first(where: { $0.id == id }) { planFromList([t], day: .today) }
+        case .planListTaskTomorrow(let id): if let t = listTasks.first(where: { $0.id == id }) { planFromList([t], day: .tomorrow) }
+        case .startListTask(let id): if let t = listTasks.first(where: { $0.id == id }) { startFromList(t) }
         case .lockInEvent(let id):
             if let ev = events.first(where: { $0.id == id }) {
                 startSession(task: ev.title, minutes: max(5, Int(ev.end.timeIntervalSince(Date()) / 60)))
@@ -999,7 +1007,9 @@ final class Engine: ObservableObject {
         var d = TodoDoc.load()
         if let i = d.items.firstIndex(where: { $0.id == id }) { d.items[i].done = done }
         if let i = d.tomorrow?.firstIndex(where: { $0.id == id }) { d.tomorrow![i].done = done }
-        d.save(); reloadTodos()
+        d.save()
+        if let tid = (d.items + (d.tomorrow ?? [])).first(where: { $0.id == id })?.task_id { setListDone(tid, done, plan: false) }
+        reloadTodos()
         if shift, let freed, block?.todoId != id { shiftPlan(from: planAnchor, freed: freed) }
     }
     func addSpent(_ id: String, _ minutes: Int) {
@@ -1118,7 +1128,7 @@ final class Engine: ObservableObject {
         if minuteCount % 10 == 0 { refreshEvents() }
         if block?.kind == "focus" { persist() }
         todayMinutes = finishedToday()
-        catchUp(); morningCheck(); duePlanned(); dueEvents(); idleNudge()
+        catchUp(); morningCheck(); duePlanned(); dueEvents(); dueNudge(); idleNudge()
         let f = DateFormatter(); f.dateFormat = "HH:mm"
         if f.string(from: Date()) == (cfg.recap_at ?? "21:00") { showRecap() }
         if let at = cfg.streak_reminder, !at.isEmpty, f.string(from: Date()) >= at { streakReminder() }

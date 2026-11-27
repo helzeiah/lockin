@@ -174,6 +174,27 @@ class PromptAndApply(unittest.TestCase):
         self.assertIn("Their longer breaks (keep free): 12:30-13:30", p)
         self.assertIn("They finish work at 17:00", p)
 
+    def test_the_planner_sees_the_list_and_can_pull_from_it(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [
+            {"id": "t1", "title": "Sell fridge", "due": "2026-11-22", "minutes": 30, "first_step": "take photos"},
+            {"id": "t2", "title": "Done thing", "done": "2026-11-20"}]}))
+        ctx = self.coach.plan_context("plan my day", "today")
+        self.assertIn('"ref": "L:t1"', ctx["prompt"])
+        self.assertIn("First step: take photos", ctx["prompt"])
+        self.assertNotIn("Done thing", ctx["prompt"])
+        out = self.coach.apply_plan(ctx, "plan my day", {"items": [
+            {"ref": "a1", "task": "Essay", "minutes": 45, "start": "10:00", "done": False, "why": ""},
+            {"ref": "L:t1", "task": "Sell fridge", "minutes": 30, "start": "11:00", "done": False, "why": "overdue"}], "reply": "ok"})
+        fridge = out["items"][1]
+        self.assertEqual(fridge["task_id"], "t1")
+        self.assertNotEqual(fridge["id"], "L:t1")
+
+    def test_questions_prompt_is_about_the_task(self):
+        (Path(self.tmp.name) / "tasks.json").write_text(json.dumps({"tasks": [{"id": "t1", "title": "Policy memo for gened 1120"}]}))
+        self.assertIn("Policy memo for gened 1120", self.coach.questions_context("t1")["prompt"])
+        with self.assertRaises(Exception):
+            self.coach.questions_context("nope")
+
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")
         with self.assertRaises(Exception):

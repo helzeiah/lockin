@@ -4,6 +4,7 @@
     coach.py recap                -> today's focus and accountability record from log.jsonl
     coach.py slot MINUTES [SKIP]  -> the soonest start (HH:MM) around the calendar and what's already planned (no AI)
     coach.py todos [today|tomorrow] -> a message on stdin ("dump", "finished X", "free at 8 now") -> the AI edits that day
+    coach.py questions TASK_ID    -> up to 3 questions the AI would ask about a to-do list task, to plan it well
     coach.py test                 -> checks the AI set up in Settings > AI planner
 Data lives in $FOCUS_DATA (the app sets it to ~/Library/Application Support/lockin), else next to this file.
 The app rolls the day over (tomorrow's plan becomes today's) before it calls this script, so this script never does.
@@ -28,6 +29,7 @@ DATA = Path(os.environ.get("FOCUS_DATA") or ROOT)
 LOG = DATA / "log.jsonl"
 TODOS = DATA / "todos.json"
 CONFIG = DATA / "config.json"
+TASKS = DATA / "tasks.json"     # the running to-do list (the app writes it; read-only here)
 DAY_STARTS_AT = 4          # a day runs 4am to 4am, the same as the app's stats
 
 
@@ -59,6 +61,41 @@ def load_doc():
 
 def load_todos():
     return load_doc()["items"]
+
+
+def load_tasks():
+    """The running to-do list, open tasks only, most urgent first (overdue, due today, starred, due soon, the rest)."""
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+    today = plan_date()
+
+    def key(t):
+        try:
+            n = (dt.date.fromisoformat(t["due"]) - today).days if t.get("due") else None
+        except ValueError:
+            n = None
+        tier = 0 if n is not None and n < 0 else 1 if n == 0 else 2 if t.get("starred") else 3 if n is not None and n <= 3 else 4
+        return (tier, n if n is not None else 10**6, t.get("created") or "")
+    return sorted([t for t in tasks if isinstance(t, dict) and not t.get("done") and t.get("id") and t.get("title")], key=key)
+
+
+def task_line(t):
+    """A list task for the AI: its ref, title, due date, length, star and what you've said about it."""
+    out = {"ref": "L:" + t["id"], "task": t["title"]}
+    if t.get("due"):
+        out["due"] = t["due"]
+    if t.get("minutes"):
+        out["minutes"] = t["minutes"]
+    if t.get("starred"):
+        out["starred"] = True
+    notes = [t.get("notes") or "", ("First step: " + t["first_step"]) if t.get("first_step") else ""]
+    notes += [f'{qa.get("q", "")} {qa.get("a", "")}' for qa in t.get("qa") or [] if isinstance(qa, dict)]
+    notes = " · ".join(n for n in notes if n)
+    if notes:
+        out["notes"] = notes[:400]
+    return out
 
 
 def extras():
@@ -220,6 +257,8 @@ def plan_context(text, day="today"):
                 "minutes_already_worked": t.get("spent", 0)} for t in items]
     history = "\n".join(f"{m['role']}: {m['text']}" for m in chat[-8:]) if not tomorrow else ""
     back = [{"ref": b["id"], "task": b["task"], "minutes": b["minutes"], "from": b.get("from")} for b in backlog]
+    planned = {t.get("task_id") for t in items if t.get("task_id")}
+    todo_list = [task_line(t) for t in load_tasks() if t["id"] not in planned][:30]
     item = {"type": "object", "properties": {
         "ref": {"type": "string", "description": "the existing item's ref, or \"new\""},
         "task": {"type": "string"}, "minutes": {"type": "integer"},
@@ -249,6 +288,10 @@ How to update:
 - "minutes" is an item's total length. If it has minutes_already_worked, only the rest still needs room in the schedule.
 - BACKLOG = unfinished items from earlier days. Do NOT add them on your own. Only if their message asks for one
   ("bring back X", "add my backlog") include it, using its backlog "ref".
+- TO-DO LIST = their running list of everything they need to do (refs start with "L:"). When they ask you to plan
+  the day, fill free time, or "what should I do", pull from it: overdue and due-soon first, then starred. Add one
+  using its "L:" ref, its title as the task, and its minutes if it has them; use its notes to size and order it.
+  For a narrow edit ("done X", "free at 8") leave the list alone.
 - One concrete action per item ("Write the intro section of the essay"). Chunks of 25-90 minutes.
 - Order unfinished items by urgency (hard deadlines first), then importance; make the first one easy to start.
 - "why": at most 8 words.
@@ -265,11 +308,46 @@ Free windows: {free}
 {("Notes from their own tools:" + chr(10) + notes + chr(10)) if notes else ""}
 Current plan: {json.dumps(current)}
 Backlog (not part of the plan unless they ask): {json.dumps(back)}
+To-do list (not on the plan yet): {json.dumps(todo_list)}
 {("Earlier today: " + history) if history else ""}
 
 Their message:
 {text[:4000]}"""
     return {"cfg": cfgj, "prompt": prompt, "schema": schema, "doc": doc, "items": items, "backlog": backlog, "chat": chat, "tomorrow": tomorrow}
+
+
+def questions_context(task_id):
+    """The prompt for the AI's questions about one to-do list task, and the answer's schema."""
+    cfg = load_config()
+    try:
+        tasks = json.loads(TASKS.read_text()).get("tasks", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        tasks = []
+    t = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id), None)
+    if not t:
+        raise ai.AIError("that task isn't on the list")
+    about = (cfg.get("about_me") or "").strip() or "no details given"
+    schema = {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"},
+              "description": "0 to 3 short questions"}}, "required": ["questions"], "additionalProperties": False}
+    prompt = f"""You help someone plan a task from their to-do list inside a focus app. About them: {about}
+Ask at most 3 short questions whose answers would change how this task gets planned: what exactly is involved or
+how big it is, what it depends on or who it's waiting on, what "done" looks like, or a deadline detail that isn't clear.
+Don't ask what they've already said below. Don't ask when it's due or how long it takes unless it's still unclear.
+Each question under 15 words, plain and specific to this task. If the task is already clear, return no questions.
+
+Task: {t.get("title", "")}
+What they've said about it: {json.dumps(task_line(t))}
+Today: {plan_date():%A %B %d}"""
+    return {"cfg": cfg, "prompt": prompt, "schema": schema}
+
+
+def questions_from_ai(task_id):
+    ctx = questions_context(task_id)
+    res = ai.ask_json(ctx["cfg"], ctx["prompt"], ctx["schema"])
+    qs = res.get("questions") if isinstance(res, dict) else None
+    if not isinstance(qs, list):
+        raise ai.AIError("the AI's answer wasn't a list of questions")
+    return [" ".join(str(q).split())[:160] for q in qs if str(q).strip()][:3]
 
 
 def todos_from_ai(text, day="today"):
@@ -285,6 +363,7 @@ def apply_plan(ctx, text, res):
     if not isinstance(res, dict) or not isinstance(res.get("items"), list):
         raise ai.AIError("the AI's answer wasn't a plan: try again")
     known = {t["id"]: t for t in items} | {b["id"]: b for b in backlog}
+    listed = {"L:" + t["id"]: t for t in load_tasks()}
     new_items, used = [], set()
     for raw in res["items"][:40]:
         it = clean_item(raw) if isinstance(raw, dict) else None
@@ -295,10 +374,13 @@ def apply_plan(ctx, text, res):
         it["id"] = ref if old and ref not in used else uuid.uuid4().hex[:8]
         used.add(it["id"])
         it["block"] = ""
-        if old:   # what the app knows about an item survives a re-plan: time worked, its apps, its rule, repeat
-            for k in ("spent", "apps", "block", "source", "ref"):
+        if old:   # what the app knows about an item survives a re-plan: time worked, its apps, its rule, repeat, list task
+            for k in ("spent", "apps", "block", "source", "ref", "task_id"):
                 if old.get(k):
                     it[k] = old[k]
+        elif ref in listed and ref not in used:   # pulled in from the to-do list
+            it["task_id"] = listed[ref]["id"]
+            used.add(ref)
         new_items.append(it)
     reply = " ".join(str(res.get("reply") or "Updated your plan.").split())[:200]
     if TODOS.exists():  # keep the previous version, in case an edit goes wrong
@@ -423,6 +505,12 @@ if __name__ == "__main__":
             payload = json.loads(sys.stdin.read() or "{}")
             text = str(payload.get("text") or "")
             print(json.dumps(apply_plan(plan_context(text, day), text, payload.get("result"))))
+        except Exception as e:
+            print(json.dumps({"error": str(e)[:200]}))
+    elif cmd in ("questions", "qprompt"):   # qprompt: Apple Intelligence runs in the app, so just the prompt
+        try:
+            tid = sys.argv[2] if len(sys.argv) > 2 else ""
+            print(json.dumps({"questions": questions_from_ai(tid)} if cmd == "questions" else {"prompt": questions_context(tid)["prompt"]}))
         except Exception as e:
             print(json.dumps({"error": str(e)[:200]}))
     elif cmd == "slot":

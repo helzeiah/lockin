@@ -151,6 +151,7 @@ struct GateView: View {
             DayShapeCard(day: .today)
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.05)))
+            ListSuggestions(day: .today)
             if open.isEmpty && upcomingEvents.isEmpty {
                 Text("Nothing planned yet. What are you locking in on today?")
                     .font(.system(size: 14)).foregroundStyle(.secondary).padding(.vertical, 6)

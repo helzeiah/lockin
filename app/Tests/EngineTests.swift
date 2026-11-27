@@ -237,6 +237,59 @@ struct EngineTests {
         try! json(["date": today(), "items": []]).write(to: Paths.todos)
         e.reloadTodos()
 
+        // The to-do list: typing a task in, ranking, suggestions, nudges, and finishing it from the plan.
+        do {
+            let base = Stats.day(of: Date())
+            func day(_ n: Int) -> String { ymd(cal.date(byAdding: .day, value: n, to: base)!) }
+            let typed = TaskList.parse("* sell fridge due tomorrow 30m\n  post it on marketplace\npolicy memo by 12/5 1.5h\nclean up drive", now: Date())
+            check(typed.count == 3, "one task per line, indented lines are notes: \(typed.map(\.title))")
+            check(typed[0].title == "sell fridge" && typed[0].isStarred && typed[0].minutes == 30 && typed[0].due == day(1)
+                  && typed[0].notes == "post it on marketplace", "parses star, length, due date and notes: \(typed[0])")
+            check(typed[1].title == "policy memo" && typed[1].minutes == 90 && typed[1].due?.hasSuffix("-12-05") == true, "by 12/5 and 1.5h")
+            check(typed[2].due == nil && typed[2].minutes == nil && typed[2].openQuestions == [.due, .minutes, .firstStep], "a bare task gets asked the basics")
+            check(TaskList.parseLine("stand by the door")?.title == "stand by the door", "\"by\" without a date stays in the title")
+            if let fri = TaskList.dueDate("fri") { check(cal.component(.weekday, from: fri) == 6 && fri >= base, "fri is this coming Friday") }
+
+            func task(_ id: String, due: Int? = nil, star: Bool = false) -> ListTask {
+                ListTask(id: id, title: id, due: due.map(day), starred: star, created: day(-5))
+            }
+            let all = [task("later", due: 10), task("anytime"), task("star", star: true), task("soon", due: 2), task("today", due: 0), task("late", due: -2)]
+            check(TaskList.ranked(all).map(\.id) == ["late", "today", "star", "soon", "later", "anytime"], "ranked: \(TaskList.ranked(all).map(\.id))")
+            let sug = TaskList.suggestions(all, planned: ["today"], day: .today)
+            check(sug.first?.task.id == "late" && sug.first?.picked == true && !sug.contains { $0.task.id == "today" }, "suggests what's due, minus what's planned")
+            check(sug.first { $0.task.id == "soon" }?.picked == false && sug.first { $0.task.id == "star" }?.picked == true, "starred starts ticked, later ones don't")
+            check(sug.first?.why == "Overdue 2 days", "says why: \(sug.first?.why ?? "")")
+            let morning = cal.date(bySettingHour: 10, minute: 0, second: 0, of: base)!, evening = cal.date(bySettingHour: 19, minute: 0, second: 0, of: base)!
+            check(TaskList.nudge(all, today: [], tomorrow: [], nudged: [], now: morning)?.task.id == "late", "nudges the overdue one first")
+            check(TaskList.nudge(all, today: ["late", "today"], tomorrow: [], nudged: [], now: morning) == nil, "nothing to nudge once it's planned")
+            let dueTomorrow = [task("t", due: 1)]
+            check(TaskList.nudge(dueTomorrow, today: [], tomorrow: [], nudged: [], now: morning) == nil
+                  && TaskList.nudge(dueTomorrow, today: [], tomorrow: [], nudged: [], now: evening)?.tomorrow == true, "due tomorrow: an evening nudge")
+
+            // Finishing its session ticks it off the list; finishing it on the list ticks the session.
+            try! json(["date": today(), "items": []]).write(to: Paths.todos)
+            TaskListDoc(tasks: [task("a"), task("b")]).save()
+            e.reloadTodos()
+            try! json(["date": today(), "items": [["id": "pa", "task": "a", "minutes": 30, "task_id": "a"],
+                                                  ["id": "pb", "task": "b", "minutes": 30, "task_id": "b"]]]).write(to: Paths.todos)
+            e.reloadTodos()
+            e.setDone("pa", true)
+            check(e.listTasks.first { $0.id == "a" }?.isDone == true, "a session done ticks its list task")
+            e.setListDone("b", true)
+            check(e.todos.first { $0.id == "pb" }?.isDone == true, "a list task done ticks its session")
+            e.setListDone("b", false)
+            check(e.todos.first { $0.id == "pb" }?.isDone == false && e.listTasks.first { $0.id == "b" }?.isDone == false, "and back")
+
+            // A list task left unfinished stays on the list instead of going to the backlog.
+            try! json(["date": day(-1), "items": [["id": "pb", "task": "b", "minutes": 30, "task_id": "b"],
+                                                  ["id": "x", "task": "Plain", "minutes": 30]]]).write(to: Paths.todos)
+            let rolled = TodoDoc.load()
+            check(rolled.backlog?.map(\.task) == ["Plain"], "list tasks don't land in the backlog: \(rolled.backlog?.map(\.task) ?? [])")
+            try? FileManager.default.removeItem(at: Paths.tasks)
+            try! json(["date": today(), "items": []]).write(to: Paths.todos)
+            e.reloadTodos()
+        }
+
         // Setting a time yourself pins it; the plan doesn't pin times it picks.
         e.addTodo(task: "Pin me", minutes: 30, start: "")
         if let t = e.todos.first(where: { $0.task == "Pin me" }) {

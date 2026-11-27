@@ -37,6 +37,7 @@ enum Paths {
     static let log = dir.appendingPathComponent("log.jsonl")
     static let todos = dir.appendingPathComponent("todos.json")
     static let state = dir.appendingPathComponent("state.json")
+    static let tasks = dir.appendingPathComponent("tasks.json")      // the running to-do list
     // build.sh copies these into Contents/Resources
     static let resources = Bundle.main.resourceURL ?? Bundle.main.bundleURL
     static let coach = resources.appendingPathComponent("coach.py")
@@ -164,6 +165,7 @@ struct Todo: Codable, Identifiable, Hashable {
     var source: String? = nil        // "routine" (repeats) or "calendar"
     var ref: String? = nil           // the routine's id or the calendar event's id
     var pinned: Bool? = nil          // a time you set yourself: the plan flows around it until it goes by
+    var task_id: String? = nil       // the to-do list task it came from
     var isDone: Bool { done ?? false }
     var left: Int { max(1, minutes - (spent ?? 0)) }
     var isRoutine: Bool { source == "routine" }
@@ -171,10 +173,10 @@ struct Todo: Codable, Identifiable, Hashable {
     static func newId() -> String { String(UUID().uuidString.prefix(8)).lowercased() }
 
     init(id: String, task: String, block: String = "", minutes: Int, start: String? = "", done: Bool? = false, why: String? = "",
-         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil, pinned: Bool? = nil) {
+         from: String? = nil, spent: Int? = 0, apps: [String]? = nil, source: String? = nil, ref: String? = nil, pinned: Bool? = nil, task_id: String? = nil) {
         self.id = id; self.task = task; self.block = block; self.minutes = minutes; self.start = start; self.done = done
         self.why = why; self.from = from; self.spent = spent; self.apps = apps; self.source = source; self.ref = ref
-        self.pinned = pinned
+        self.pinned = pinned; self.task_id = task_id
     }
 
     /// Tolerant: only id, task and minutes have to be there (the helper script and older versions write fewer fields).
@@ -193,6 +195,7 @@ struct Todo: Codable, Identifiable, Hashable {
         source = try? c.decodeIfPresent(String.self, forKey: .source)
         ref = try? c.decodeIfPresent(String.self, forKey: .ref)
         pinned = try? c.decodeIfPresent(Bool.self, forKey: .pinned)
+        task_id = try? c.decodeIfPresent(String.self, forKey: .task_id)
     }
 }
 
@@ -272,7 +275,8 @@ struct TodoDoc: Codable {
         // Plans for a day that already went by (away for a few days) land in the backlog too.
         let nextDay = DateFormatter.ymd.date(from: d).flatMap { Calendar.current.date(byAdding: .day, value: 1, to: $0) }
         let tomorrowIsToday = nextDay.map { DateFormatter.ymd.string(from: $0) == t } ?? false
-        let leftovers = items.filter { !$0.isDone && $0.source == nil } + (tomorrowIsToday ? [] : (tomorrow ?? []))
+        // To-do list tasks aren't leftovers: they're still on the list.
+        let leftovers = (items.filter { !$0.isDone && $0.source == nil } + (tomorrowIsToday ? [] : (tomorrow ?? []))).filter { $0.task_id == nil }
         for var item in leftovers {
             item.start = ""; item.why = ""; item.from = d
             back[item.task.lowercased()] = item
@@ -426,7 +430,7 @@ func runCoach(_ args: [String], input: String? = nil) -> String {
                "HOME": home, "USER": user, "LOGNAME": user, "LANG": "en_US.UTF-8", "TERM": "xterm",
                "FOCUS_DATA": Paths.dir.path, "FOCUS_CALEVENTS": Paths.calevents.path, "FOCUS_TODAY": today(),
                "PYTHONDONTWRITEBYTECODE": "1"]   // never write __pycache__ into the signed app bundle
-    if ["todos", "test"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
+    if ["todos", "test", "questions"].contains(args.first ?? ""), let key = Keychain.get() { env["FOCUS_AI_KEY"] = key }  // only calls that reach the AI
     p.environment = env
     let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
     let inp = Pipe(); p.standardInput = inp
