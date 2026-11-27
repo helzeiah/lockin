@@ -92,6 +92,7 @@ final class Engine: ObservableObject {
     private var lastOnTask: (app: String, url: String)?
     private var lastIdleNudge = Date().addingTimeInterval(-30 * 60)
     private var lastBlockEnd = Date.distantPast
+    private(set) var nextBreakMinutes = 5      // what the last session earned (Config.breakAfter)
     @Published private(set) var coverShownAt = Date.distantPast
     private var lastCoverSound = Date.distantPast
     private var closeTask: DispatchWorkItem?
@@ -330,7 +331,7 @@ final class Engine: ObservableObject {
         let end = parseHHMM(shape?.finish ?? cfg.day_end ?? "23:30", on: now) ?? now
         let list = d.list(day)
         let new = TodoDoc.retimed(list, from: from, busy: busy, dayEnd: end, now: now, freed: freed,
-                                  keep: day == .today ? block?.todoId : nil, last: last)
+                                  keep: day == .today ? block?.todoId : nil, last: last, breakAfter: cfg.breakAfter)
         let moved = zip(list, new).filter { $0.start != $1.start }.count
         guard moved > 0 else { return 0 }
         d.edit(day) { $0 = new }; d.save(); reloadTodos()
@@ -351,10 +352,10 @@ final class Engine: ObservableObject {
         if dropped > 0 { showPlanNote("\(dropped) session\(dropped == 1 ? "" : "s") won't fit before \(clockLabel(shape.finish ?? cfg.day_end ?? "23:30")). Shorten or move \(dropped == 1 ? "it" : "them")") }
         else if n > 0 { showPlanNote("Moved \(n) session\(n == 1 ? "" : "s") around your day") }
     }
-    /// When the next session can start: after the running one (and a break), else now.
+    /// When the next session can start: after the running one (and its break), else now.
     var planAnchor: Date {
         guard let b = block else { return Date() }
-        return Date(timeIntervalSince1970: b.ends + (b.kind == "focus" ? 300 : 0))
+        return Date(timeIntervalSince1970: b.ends + (b.kind == "focus" ? Double(cfg.breakAfter(b.minutes)) * 60 : 0))
     }
     /// The slot a to-do on today's plan was set for.
     func slot(of id: String) -> (start: Date, end: Date)? {
@@ -509,8 +510,9 @@ final class Engine: ObservableObject {
         return cfg.blocks.first { $0.name.lowercased() == n } ?? TaskMatch.rule(for: name, in: cfg.blocks)
     }
 
+    /// A break as long as the last session earned (see Config.breakAfter).
     func startBreak() {
-        let m = cfg.break_minutes ?? 5, t = Date().timeIntervalSince1970
+        let m = nextBreakMinutes, t = Date().timeIntervalSince1970
         block = ActiveBlock(kind: "break", name: "Break", task: nil, todoId: nil, started: t, ends: t + Double(m * 60), minutes: m, offSeconds: 0)
         blocked = nil; persist()
     }
@@ -531,6 +533,7 @@ final class Engine: ObservableObject {
             return
         }
         let elapsed = Int((Date().timeIntervalSince1970 - b.started) / 60)
+        nextBreakMinutes = cfg.breakAfter(elapsed)   // the break scales with how long you were locked in
         // Only real work counts: active minutes, plus away time on offline-ok tasks. (Old sessions: elapsed minus off-task.)
         let focused = b.tracked ? min(elapsed, b.countedMinutes) : max(0, elapsed - Int(b.offSeconds / 60))
         let idleMin = Int(((b.idleSeconds ?? 0) / 60).rounded())
@@ -546,7 +549,7 @@ final class Engine: ObservableObject {
             if completed { setDone(id, true, shift: false) }
             else { addSpent(id, Int(((Date().timeIntervalSince1970 - b.started) / 60).rounded())) }   // resume with what's left
             // The rest of today moves to fit, after a break; what's left of a session ended early goes after the others.
-            shiftPlan(from: Date().addingTimeInterval(300), freed: ran, last: completed ? nil : id)
+            shiftPlan(from: Date().addingTimeInterval(Double(nextBreakMinutes) * 60), freed: ran, last: completed ? nil : id)
         }
         let before = todayMinutes
         let st = stats()
@@ -555,7 +558,7 @@ final class Engine: ObservableObject {
         guard !silent else { return }
         let xp = xpGain(rBefore.xp, rAfter.xp, worked: activeMin + offlineMin / 2, planned: b.minutes, completed: completed)
         let hitGoal = st.todayMinutes >= goal && before < goal   // this session made today count
-        let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(cfg.break_minutes ?? 5) min", action: .startBreak, primary: true)]
+        let breakButtons = [CardButton(label: "Skip break", action: .startNext), CardButton(label: "Break \(nextBreakMinutes) min", action: .startBreak, primary: true)]
         Skin.noteLevel(rAfter.level)
         if rAfter.level > rBefore.level {   // the card plays the fanfare when its bar crosses into the new level
             let skin = Skin.all.last { $0.level > rBefore.level && $0.level <= rAfter.level }

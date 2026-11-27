@@ -183,8 +183,23 @@ def break_times(shape, day):
     return out
 
 
-def busy_from(items, day):
-    """(start, end) of to-dos that already have a time, plus a 5 minute break after each."""
+def break_after(cfg, minutes):
+    """The break after a session this long: its length ÷ break_ratio (3-6), or the fixed break_minutes when that's 0.
+    Configs from before break_ratio keep a break length changed by hand (the same rule as the app)."""
+    fixed = int(cfg.get("break_minutes") or 5)
+    ratio = cfg.get("break_ratio")
+    if ratio is None:
+        ratio = 5 if fixed == 5 else 0
+    try:
+        ratio = int(ratio)
+    except (TypeError, ValueError):
+        ratio = 5
+    return max(1, round(minutes / ratio)) if ratio > 0 else max(1, fixed)
+
+
+def busy_from(items, day, cfg=None):
+    """(start, end) of to-dos that already have a time, plus the break after each."""
+    cfg = cfg if cfg is not None else load_config()
     out = []
     for t in items:
         if t.get("done") or len(t.get("start") or "") < 4:
@@ -195,7 +210,7 @@ def busy_from(items, day):
             continue
         a = dt.datetime.combine(day, dt.time(h, m))
         left = max(1, int(t.get("minutes", 30)) - int(t.get("spent", 0) or 0))
-        out.append((a, a + dt.timedelta(minutes=left + 5)))
+        out.append((a, a + dt.timedelta(minutes=left + break_after(cfg, left))))
     return out
 
 
@@ -207,7 +222,7 @@ def soonest_slot(minutes, skip=None):
     doc = load_doc()
     shape = day_shape(doc)
     busy = ([(a, b) for a, b, _ in calendar_events()] + break_times(shape, today)
-            + busy_from([t for t in doc["items"] if t.get("id") != skip], today))
+            + busy_from([t for t in doc["items"] if t.get("id") != skip], today, cfg))
     need = dt.timedelta(minutes=minutes)
     for a, b in free_windows(busy, dt.datetime.now(), day_end_time(cfg, today, shape), min_minutes=minutes):
         if b - a >= need:
@@ -277,6 +292,7 @@ def plan_context(text, day="today"):
         except Exception:
             notes = ""
     which = f"tomorrow ({pdate:%A %B %d})" if tomorrow else "today"
+    breaks_rule = f"{break_after(cfgj, 30)} min after a 30-minute one, {break_after(cfgj, 90)} min after 90 minutes"
     prompt = f"""You are the day planner inside a focus app. About the user: {about}
 They talk to you about {which}; you return that day's whole updated plan plus a one-sentence reply.
 
@@ -295,7 +311,7 @@ How to update:
 - One concrete action per item ("Write the intro section of the essay"). Chunks of 25-90 minutes.
 - Order unfinished items by urgency (hard deadlines first), then importance; make the first one easy to start.
 - "why": at most 8 words.
-- SCHEDULE unfinished items: a 24h HH:MM "start", back to back with ~5 min breaks, inside the free windows,
+- SCHEDULE unfinished items: a 24h HH:MM "start", back to back with a break after each ({breaks_rule}), inside the free windows,
   never overlapping calendar events or their breaks{"" if tomorrow else ", never before now"}. Timing they state always wins.
   They finish work at {day_end:%H:%M}: nothing may run past it. If it doesn't fit, start "" and why "doesn't fit".
 - reply: plain and specific, e.g. "Marked stats homework done and moved everything after 8 PM." No fluff.

@@ -69,6 +69,16 @@ class Windows(unittest.TestCase):
         self.assertEqual(self.coach.day_end_time({}, d, {"finish": "17:00"}), dt.datetime(2026, 11, 23, 17, 0))
         self.assertEqual(self.coach.day_end_time({"day_end": "22:00"}, d, {}), dt.datetime(2026, 11, 23, 22, 0))
 
+    def test_breaks_scale_with_the_session(self):
+        self.assertEqual(self.coach.break_after({}, 25), 5)
+        self.assertEqual(self.coach.break_after({}, 90), 18)
+        self.assertEqual(self.coach.break_after({"break_ratio": 3}, 90), 30)
+        self.assertEqual(self.coach.break_after({"break_ratio": 0, "break_minutes": 7}, 90), 7)
+        self.assertEqual(self.coach.break_after({"break_minutes": 10}, 90), 10)   # an old config keeps its hand-set break
+        d = dt.date(2026, 11, 23)
+        busy = self.coach.busy_from([{"start": "09:00", "minutes": 90}], d, {"break_ratio": 3})
+        self.assertEqual(busy, [(dt.datetime(2026, 11, 23, 9, 0), dt.datetime(2026, 11, 23, 11, 0))])
+
     def test_short_gaps_are_dropped(self):
         d = dt.datetime(2026, 11, 23)
         busy = [(d.replace(hour=10, minute=10), d.replace(hour=12))]

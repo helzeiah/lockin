@@ -290,6 +290,35 @@ struct EngineTests {
             e.reloadTodos()
         }
 
+        // Breaks scale with the session: its length ÷ the ratio; 0 = a fixed length; old configs keep a hand-set length.
+        do {
+            var c = Config.empty
+            check(c.breakAfter(25) == 5 && c.breakAfter(90) == 18 && c.breakAfter(2) == 1, "÷ 5 by default: \(c.breakAfter(90))")
+            c.break_ratio = 3
+            check(c.breakAfter(90) == 30, "÷ 3")
+            c.break_ratio = 0; c.break_minutes = 7
+            check(c.breakAfter(90) == 7 && c.breakAfter(10) == 7, "fixed length")
+            c.break_ratio = nil
+            check(c.breakRatio == 0 && c.breakAfter(90) == 7, "a config with a hand-set break keeps it")
+
+            // The plan leaves each session's own break after it.
+            let day = cal.date(bySettingHour: 9, minute: 0, second: 0, of: Date())!
+            let plan = [Todo(id: "a", task: "a", minutes: 90, start: "08:00"), Todo(id: "b", task: "b", minutes: 30, start: "08:00")]
+            let r = TodoDoc.retimed(plan, from: day, busy: [], dayEnd: day.addingTimeInterval(14 * 3600), now: day, breakAfter: { $0 / 3 })
+            check(r.map { $0.start ?? "" } == ["09:00", "11:00"], "90 min ÷ 3 leaves a 30-min break: \(r.map { $0.start ?? "" })")
+
+            // After a session, the break offered is what it earned.
+            e.reloadConfig()
+            e.startSession(task: "Long one", minutes: 90, apps: ["Pages"])
+            e.block?.started -= 90 * 60
+            e.stopBlock(completed: false)
+            check(e.nextBreakMinutes == 18, "90 locked-in minutes earn an 18-minute break: \(e.nextBreakMinutes)")
+            e.card = nil
+            e.startBreak()
+            check(e.block?.kind == "break" && e.block?.minutes == 18, "the break runs that long")
+            e.stopBlock(completed: false, silent: true); e.card = nil
+        }
+
         // Setting a time yourself pins it; the plan doesn't pin times it picks.
         e.addTodo(task: "Pin me", minutes: 30, start: "")
         if let t = e.todos.first(where: { $0.task == "Pin me" }) {

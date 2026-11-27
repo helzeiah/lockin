@@ -104,7 +104,8 @@ struct AISettings: Codable { var provider: String? }
 struct Config: Codable {
     var drift_seconds: Double? = 30
     var renudge_seconds: Double? = 120
-    var break_minutes: Int? = 5
+    var break_minutes: Int? = 5          // a break's length when it doesn't scale with the session
+    var break_ratio: Int? = nil          // a break is the session's length ÷ this (3-6); 0 = always break_minutes
     var recap_at: String? = "21:00"
     var morning_hour: Int? = 5
     var idle_nudge_minutes: Double? = 40
@@ -135,6 +136,13 @@ struct Config: Codable {
     var routines: [Routine]? = []
 
     var aiOn: Bool { !["", "none"].contains(ai?.provider ?? "none") }
+    /// Breaks scale with the session: its length ÷ this, or 0 for a fixed length. Configs from before this setting
+    /// keep a break length you changed by hand; everyone else gets ÷ 5 (a 5-minute break after 25 minutes).
+    var breakRatio: Int { break_ratio ?? ((break_minutes ?? 5) == 5 ? 5 : 0) }
+    /// The break after a session this many minutes long. At least a minute.
+    func breakAfter(_ minutes: Int) -> Int {
+        breakRatio > 0 ? max(1, Int((Double(minutes) / Double(breakRatio)).rounded())) : max(1, break_minutes ?? 5)
+    }
     var locked: Bool { (blocking ?? "hard") == "hard" }
 
     static func load() -> Config? {
@@ -317,29 +325,30 @@ struct TodoDoc: Codable {
     }
 
     /// The plan follows the day: today's open sessions re-timed in order, none before `from` (rounded up to 5 minutes),
-    /// with a 5-minute break after each and around `busy` (calendar events). Repeats, calendar sessions and times you
+    /// with a break after each (`breakAfter` its minutes) and around `busy` (calendar events). Repeats, calendar sessions and times you
     /// set yourself (while still ahead) keep their time and count as busy too. A session moves later only as far as it
     /// has to, so gaps in the plan absorb a delay. `freed` is the slot a session that finished or started early was
     /// planned for: the sessions queued right behind it move up, until the first real gap. `last` (a session ended
     /// early) goes after the rest. Ones that no longer fit before `dayEnd` lose their time; `keep` (the running
     /// session) and to-dos without a time aren't touched.
     static func retimed(_ items: [Todo], from: Date, busy: [(Date, Date)], dayEnd: Date, now: Date = Date(),
-                        freed: (start: Date, end: Date)? = nil, keep: String? = nil, last: String? = nil) -> [Todo] {
+                        freed: (start: Date, end: Date)? = nil, keep: String? = nil, last: String? = nil,
+                        breakAfter: (Int) -> Int = { _ in 5 }) -> [Todo] {
         func at(_ t: Todo) -> Date? { parseHHMM(t.start ?? "", on: now) }
         func roundUp(_ d: Date) -> Date { Date(timeIntervalSince1970: (d.timeIntervalSince1970 / 300).rounded(.up) * 300) }
         func fixed(_ t: Todo) -> Bool { t.source != nil || ((t.pinned ?? false) && (at(t).map { $0 >= now } ?? false)) }
         var taken = busy
         for t in items where !t.isDone && t.id != keep && fixed(t) {
-            if let a = at(t) { taken.append((a, a.addingTimeInterval(Double(t.left + 5) * 60))) }
+            if let a = at(t) { taken.append((a, a.addingTimeInterval(Double(t.left + breakAfter(t.left)) * 60))) }
         }
         var queue = items.indices.filter { !items[$0].isDone && items[$0].id != keep && !fixed(items[$0]) && at(items[$0]) != nil }
         if let last, let i = queue.firstIndex(where: { items[$0].id == last }) { queue.append(queue.remove(at: i)) }
         var out = items, cursor = roundUp(from), pull = freed
         for i in queue {
-            let t = items[i], old = at(t)!, len = Double(t.left) * 60
+            let t = items[i], old = at(t)!, len = Double(t.left) * 60, gap = Double(breakAfter(t.left)) * 60
             var s = max(old, cursor)
             if let p = pull, t.id != last, old >= p.start {
-                if old <= p.end.addingTimeInterval(600) { s = cursor; pull = (old, old.addingTimeInterval(len + 300)) }
+                if old <= p.end.addingTimeInterval(600) { s = cursor; pull = (old, old.addingTimeInterval(len + gap)) }
                 else { pull = nil }   // a real gap: everything after it stays where it is
             }
             var clear = false
@@ -349,7 +358,7 @@ struct TodoDoc: Codable {
             }
             if s.addingTimeInterval(len) > dayEnd { out[i].start = ""; out[i].pinned = nil; continue }
             if hhmm(s) != t.start { out[i].start = hhmm(s); out[i].pinned = nil }
-            cursor = s.addingTimeInterval(len + 300)
+            cursor = s.addingTimeInterval(len + gap)
         }
         return out
     }
