@@ -62,6 +62,13 @@ class Windows(unittest.TestCase):
         self.assertEqual([(a.strftime("%H:%M"), b.strftime("%H:%M")) for a, b in got],
                          [("09:05", "10:00"), ("11:00", "13:00"), ("14:00", "17:00")])
 
+    def test_break_times_skip_junk(self):
+        d = dt.date(2026, 11, 23)
+        got = self.coach.break_times({"breaks": [{"start": "12:30", "minutes": 45}, {"start": "noon"}, "x"]}, d)
+        self.assertEqual(got, [(dt.datetime(2026, 11, 23, 12, 30), dt.datetime(2026, 11, 23, 13, 15))])
+        self.assertEqual(self.coach.day_end_time({}, d, {"finish": "17:00"}), dt.datetime(2026, 11, 23, 17, 0))
+        self.assertEqual(self.coach.day_end_time({"day_end": "22:00"}, d, {}), dt.datetime(2026, 11, 23, 22, 0))
+
     def test_short_gaps_are_dropped(self):
         d = dt.datetime(2026, 11, 23)
         busy = [(d.replace(hour=10, minute=10), d.replace(hour=12))]
@@ -158,6 +165,14 @@ class PromptAndApply(unittest.TestCase):
         self.assertEqual(gym["block"], "")
         saved = json.loads((Path(self.tmp.name) / "todos.json").read_text())
         self.assertEqual([t["task"] for t in saved["items"]], ["Essay", "Gym"])
+
+    def test_prompt_keeps_breaks_free_and_ends_at_the_finish(self):
+        doc = json.loads((Path(self.tmp.name) / "todos.json").read_text())
+        doc["shape"] = {"breaks": [{"start": "12:30", "minutes": 60}], "finish": "17:00"}
+        (Path(self.tmp.name) / "todos.json").write_text(json.dumps(doc))
+        p = self.coach.plan_context("plan my day", "today")["prompt"]
+        self.assertIn("Their longer breaks (keep free): 12:30-13:30", p)
+        self.assertIn("They finish work at 17:00", p)
 
     def test_rejects_a_non_plan(self):
         ctx = self.coach.plan_context("x", "today")

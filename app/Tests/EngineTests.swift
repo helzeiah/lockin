@@ -216,6 +216,27 @@ struct EngineTests {
             check(starts(r) == ["", "08:00", ""], "overflow loses its time; done and untimed stay: \(starts(r))")
         }
 
+        // Breaks and a finish time: tomorrow's answer moves with the plan at rollover, and sessions fit inside it.
+        try! json(["date": ymd(cal.date(byAdding: .day, value: -1, to: todayD)!), "items": [],
+                   "tomorrow": [["id": "t", "task": "Planned last night", "minutes": 45, "start": "10:00"]],
+                   "tomorrow_shape": ["breaks": [["start": "12:30", "minutes": 60]], "finish": "18:00"]]).write(to: Paths.todos)
+        d = TodoDoc.load()
+        check(d.shape?.finish == "18:00" && d.shape?.breaks.first?.start == "12:30" && d.tomorrow_shape == nil, "tomorrow's breaks become today's")
+        try! json(["date": today(), "items": [],
+                   "tomorrow": [["id": "a", "task": "Long one", "minutes": 60, "start": "12:00"],
+                                ["id": "b", "task": "Short one", "minutes": 30, "start": "13:05"]]]).write(to: Paths.todos)
+        e.reloadTodos()
+        e.setShape(DayShape(breaks: [.init(start: "12:30", minutes: 60)], finish: "14:00"), day: .tomorrow)
+        let fitted = TodoDoc.load().tomorrow ?? []
+        check(fitted.first { $0.id == "a" }?.start == "" && fitted.first { $0.id == "b" }?.start == "13:30",
+              "sessions move past the break and lose their time past the finish: \(fitted.map { $0.start ?? "" })")
+        check(e.tomorrowShape?.finish == "14:00" && DayShape.last?.finish == "14:00", "the answer is saved and remembered")
+        check(e.planNote?.contains("won't fit before") == true, "says what didn't fit: \(e.planNote ?? "")")
+        check(DayShape(breaks: [.init(start: "12:30", minutes: 60)], finish: "18:00").summary.contains("for 1"), "summary line")
+        UserDefaults.standard.removeObject(forKey: "lastDayShape")
+        try! json(["date": today(), "items": []]).write(to: Paths.todos)
+        e.reloadTodos()
+
         // Setting a time yourself pins it; the plan doesn't pin times it picks.
         e.addTodo(task: "Pin me", minutes: 30, start: "")
         if let t = e.todos.first(where: { $0.task == "Pin me" }) {

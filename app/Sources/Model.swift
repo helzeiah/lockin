@@ -198,6 +198,31 @@ struct Todo: Codable, Identifiable, Hashable {
 
 struct ChatMsg: Codable, Hashable { var role: String; var text: String }
 
+/// The shape of a day you're asked about when you plan it: longer breaks to keep free, and when work stops.
+/// Sessions are only timed inside it. Saved with the plan, so having one at all means you've answered.
+struct DayShape: Codable, Hashable {
+    struct Break: Codable, Hashable { var start: String; var minutes: Int }   // "HH:MM"
+    var breaks: [Break] = []
+    var finish: String? = nil        // "HH:MM"; nil = the day_end setting
+
+    /// The breaks as (start, end) on `day`.
+    func busy(on day: Date) -> [(Date, Date)] {
+        breaks.compactMap { b in parseHHMM(b.start, on: day).map { ($0, $0.addingTimeInterval(Double(b.minutes) * 60)) } }
+    }
+    /// "Lunch 12:30 PM for 1 hr · done by 6:00 PM", for the summary line.
+    var summary: String {
+        let br = breaks.map { "\(clockLabel($0.start)) for \(fmtMinutes($0.minutes))" }
+        let parts = (br.isEmpty ? ["No long break"] : ["Break " + br.joined(separator: ", ")]) + (finish.map { ["done by \(clockLabel($0))"] } ?? [])
+        return parts.joined(separator: " · ")
+    }
+
+    /// Your last answer, offered as the starting point next time.
+    static var last: DayShape? {
+        get { UserDefaults.standard.data(forKey: "lastDayShape").flatMap { try? JSONDecoder().decode(DayShape.self, from: $0) } }
+        set { UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: "lastDayShape") }
+    }
+}
+
 enum PlanDay: String, CaseIterable { case today, tomorrow }
 
 struct TodoDoc: Codable {
@@ -206,6 +231,8 @@ struct TodoDoc: Codable {
     var chat: [ChatMsg]? = []
     var backlog: [Todo]? = []
     var tomorrow: [Todo]? = []
+    var shape: DayShape? = nil            // today's breaks and finish time, once asked
+    var tomorrow_shape: DayShape? = nil
 
     init(date: String? = "", items: [Todo] = [], chat: [ChatMsg]? = [], backlog: [Todo]? = [], tomorrow: [Todo]? = []) {
         self.date = date; self.items = items; self.chat = chat; self.backlog = backlog; self.tomorrow = tomorrow
@@ -217,6 +244,8 @@ struct TodoDoc: Codable {
         chat = try? c.decodeIfPresent([ChatMsg].self, forKey: .chat)
         backlog = try? c.decodeIfPresent([Todo].self, forKey: .backlog)
         tomorrow = try? c.decodeIfPresent([Todo].self, forKey: .tomorrow)
+        shape = try? c.decodeIfPresent(DayShape.self, forKey: .shape)
+        tomorrow_shape = try? c.decodeIfPresent(DayShape.self, forKey: .tomorrow_shape)
     }
 
     static func load() -> TodoDoc {
@@ -251,7 +280,8 @@ struct TodoDoc: Codable {
         let cutoff = DateFormatter.ymd.string(from: Calendar.current.date(byAdding: .day, value: -7, to: now) ?? now)
         backlog = back.values.filter { ($0.from ?? t) >= cutoff }.sorted { ($0.from ?? "") > ($1.from ?? "") }
         items = tomorrowIsToday ? (tomorrow ?? []) : []
-        tomorrow = []; chat = []; date = t
+        shape = tomorrowIsToday ? tomorrow_shape : nil
+        tomorrow = []; tomorrow_shape = nil; chat = []; date = t
         addRoutines(routines, now: now)
         sortItems()
         return true
@@ -276,6 +306,7 @@ struct TodoDoc: Codable {
         return list.enumerated().sorted { a, b in key(a.element) != key(b.element) ? key(a.element) < key(b.element) : a.offset < b.offset }.map(\.element)
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? items : (tomorrow ?? []) }
+    func shape(_ day: PlanDay) -> DayShape? { day == .today ? shape : tomorrow_shape }
     mutating func edit(_ day: PlanDay, _ change: (inout [Todo]) -> Void) {
         if day == .today { change(&items) } else { var t = tomorrow ?? []; change(&t); tomorrow = t }
         sortItems()

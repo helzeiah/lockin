@@ -64,6 +64,8 @@ final class Engine: ObservableObject {
     @Published var tomorrow: [Todo] = []
     @Published var chat: [ChatMsg] = []
     @Published var backlog: [Todo] = []
+    @Published var todayShape: DayShape?       // today's breaks and finish time, once you've answered
+    @Published var tomorrowShape: DayShape?
     @Published var events: [CalEvent] = []
     private var lastDay = today()
     @Published var planning = false
@@ -199,8 +201,11 @@ final class Engine: ObservableObject {
         tomorrow = d.tomorrow ?? []
         chat = d.chat ?? []
         backlog = d.backlog ?? []
+        todayShape = d.shape
+        tomorrowShape = d.tomorrow_shape
     }
     func list(_ day: PlanDay) -> [Todo] { day == .today ? todos : tomorrow }
+    func shape(_ day: PlanDay) -> DayShape? { day == .today ? todayShape : tomorrowShape }
 
     func refreshEvents() {
         guard (cfg.calendar_mode ?? "ask") != "off" else { events = []; return }
@@ -308,19 +313,38 @@ final class Engine: ObservableObject {
         return n
     }
 
-    /// The plan follows the day (see TodoDoc.retimed): today's open sessions re-timed from `from` around the calendar.
-    /// Returns how many moved. Not between midnight and 4am, when the clock and the plan day disagree.
-    @discardableResult func shiftPlan(from: Date, freed: (start: Date, end: Date)? = nil, last: String? = nil) -> Int {
-        let now = Date()
-        guard Calendar.current.isDate(Stats.day(of: now), inSameDayAs: now) else { return 0 }
+    /// The plan follows the day (see TodoDoc.retimed): today's open sessions re-timed from `from` around the calendar
+    /// and your breaks, ending by your finish time. Returns how many moved. Today not between midnight and 4am, when
+    /// the clock and the plan day disagree. Tomorrow's sessions only move out of the way of its breaks and finish time.
+    @discardableResult func shiftPlan(from: Date, freed: (start: Date, end: Date)? = nil, last: String? = nil, day: PlanDay = .today) -> Int {
+        let now = day == .today ? Date() : tomorrowDate()
+        if day == .today { guard Calendar.current.isDate(Stats.day(of: now), inSameDayAs: now) else { return 0 } }
         var d = TodoDoc.load()
-        let busy = events.filter { !$0.allDay }.map { ($0.start, $0.end) }
-        let end = parseHHMM(cfg.day_end ?? "23:30", on: now) ?? now
-        let new = TodoDoc.retimed(d.items, from: from, busy: busy, dayEnd: end, now: now, freed: freed, keep: block?.todoId, last: last)
-        let moved = zip(d.items, new).filter { $0.start != $1.start }.count
+        let shape = d.shape(day)
+        let busy = (day == .today ? events.filter { !$0.allDay }.map { ($0.start, $0.end) } : []) + (shape?.busy(on: now) ?? [])
+        let end = parseHHMM(shape?.finish ?? cfg.day_end ?? "23:30", on: now) ?? now
+        let list = d.list(day)
+        let new = TodoDoc.retimed(list, from: from, busy: busy, dayEnd: end, now: now, freed: freed,
+                                  keep: day == .today ? block?.todoId : nil, last: last)
+        let moved = zip(list, new).filter { $0.start != $1.start }.count
         guard moved > 0 else { return 0 }
-        d.items = new; d.sortItems(); d.save(); reloadTodos()
+        d.edit(day) { $0 = new }; d.save(); reloadTodos()
         return moved
+    }
+
+    /// Your answer to "when are your breaks, and when do you finish?" for a day: saved with the plan, remembered as the
+    /// starting point next time, and the plan moves to fit it.
+    func setShape(_ shape: DayShape, day: PlanDay) {
+        var d = TodoDoc.load()
+        if day == .today { d.shape = shape } else { d.tomorrow_shape = shape }
+        d.save(); reloadTodos()
+        DayShape.last = shape
+        let timed = Set(list(day).filter { !$0.isDone && !($0.start ?? "").isEmpty }.map(\.id))
+        let n = shiftPlan(from: day == .today ? planAnchor : tomorrowDate(), day: day)
+        let dropped = list(day).filter { timed.contains($0.id) && ($0.start ?? "").isEmpty }.count
+        appendLog(["type": "day_shape", "day": day.rawValue, "breaks": shape.breaks.map { "\($0.start)+\($0.minutes)" }, "finish": shape.finish ?? ""])
+        if dropped > 0 { showPlanNote("\(dropped) session\(dropped == 1 ? "" : "s") won't fit before \(clockLabel(shape.finish ?? cfg.day_end ?? "23:30")). Shorten or move \(dropped == 1 ? "it" : "them")") }
+        else if n > 0 { showPlanNote("Moved \(n) session\(n == 1 ? "" : "s") around your day") }
     }
     /// When the next session can start: after the running one (and a break), else now.
     var planAnchor: Date {

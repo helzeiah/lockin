@@ -132,6 +132,7 @@ struct TodayView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            DayShapeCard(day: day).padding(.horizontal, 28).padding(.bottom, 12)
             if day == .today, e.block != nil { SessionBanner().padding(.horizontal, 22).padding(.bottom, 10) }
             if entries.isEmpty { empty } else { timeline }
             if day == .today && !e.backlog.isEmpty { backlogSection }
@@ -740,5 +741,93 @@ struct TimeButton: View {
             }
             .padding(14).frame(width: 270)
         }
+    }
+}
+
+/// "When do you want a longer break, and when do you want to be done?", asked once for each day you plan (the morning
+/// screen, the planner), starting from your last answer. Once answered it's a one-line summary you click to change.
+struct DayShapeCard: View {
+    @EnvironmentObject var e: Engine
+    let day: PlanDay
+    @State private var editing = false
+    @State private var breaks: [EditBreak] = []
+    @State private var finish = Date()
+    @State private var hasFinish = true
+
+    struct EditBreak: Identifiable { let id = UUID(); var start: Date; var minutes: Int }
+
+    private var shape: DayShape? { e.shape(day) }
+    private var dayDate: Date { day == .today ? Date() : tomorrowDate() }
+
+    var body: some View {
+        Group { if shape == nil || editing { form } else { summary } }
+            .onAppear(perform: load)
+            .onChange(of: day) { _, _ in editing = false; load() }
+    }
+
+    private var summary: some View {
+        Button { load(); editing = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "cup.and.saucer").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Text(shape?.summary ?? "").font(.system(size: 12.5)).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 0)
+                Text("Change").font(.system(size: 11.5)).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).help("Change your breaks and finish time")
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("When do you want a longer break, and when do you want to be done \(day == .today ? "today" : "tomorrow")?")
+                .font(.system(size: 14, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            ForEach($breaks) { $b in
+                HStack(spacing: 8) {
+                    Text("Break at").font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                    DatePicker("", selection: $b.start, displayedComponents: .hourAndMinute).labelsHidden()
+                    Picker("", selection: $b.minutes) {
+                        ForEach([15, 30, 45, 60, 90, 120], id: \.self) { Text(fmtMinutes($0)).tag($0) }
+                    }
+                    .labelsHidden().frame(width: 90)
+                    Button { breaks.removeAll { $0.id == b.id } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove this break")
+                }
+            }
+            Button { breaks.append(EditBreak(start: nextBreakStart, minutes: 60)) } label: {
+                Label(breaks.isEmpty ? "Add a break" : "Add another break", systemImage: "plus").font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.plain).foregroundStyle(Theme.accent)
+            HStack(spacing: 8) {
+                Toggle("Finish work at", isOn: $hasFinish).toggleStyle(.checkbox).font(.system(size: 12.5)).frame(width: 96, alignment: .leading)
+                DatePicker("", selection: $finish, displayedComponents: .hourAndMinute).labelsHidden().disabled(!hasFinish)
+            }
+            HStack {
+                if shape == nil { Button("Skip") { e.setShape(DayShape(), day: day) }.buttonStyle(SecondaryButtonStyle()) }
+                else { Button("Cancel") { editing = false }.buttonStyle(SecondaryButtonStyle()) }
+                Spacer()
+                Button("Fit my plan to this", action: save).buttonStyle(PrimaryButtonStyle())
+            }
+            .controlSize(.small)
+        }
+    }
+
+    /// An hour after the last break, else 12:30.
+    private var nextBreakStart: Date {
+        breaks.last.map { $0.start.addingTimeInterval(Double($0.minutes + 60) * 60) } ?? parseHHMM("12:30", on: dayDate) ?? dayDate
+    }
+
+    /// The day's answer, else your last one, else a lunch hour and a 6pm finish.
+    private func load() {
+        let s = shape ?? DayShape.last ?? DayShape(breaks: [.init(start: "12:30", minutes: 60)], finish: "18:00")
+        breaks = s.breaks.compactMap { b in parseHHMM(b.start, on: dayDate).map { EditBreak(start: $0, minutes: b.minutes) } }
+        hasFinish = s.finish != nil
+        finish = parseHHMM(s.finish ?? "18:00", on: dayDate) ?? dayDate
+    }
+
+    private func save() {
+        let list = breaks.sorted { $0.start < $1.start }.map { DayShape.Break(start: hhmm($0.start), minutes: $0.minutes) }
+        e.setShape(DayShape(breaks: list, finish: hasFinish ? hhmm(finish) : nil), day: day)
+        editing = false
     }
 }

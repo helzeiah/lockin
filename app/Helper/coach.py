@@ -116,10 +116,34 @@ def free_windows(busy, start, day_end, min_minutes=20):
     return [(a, b) for a, b in out if (b - a).total_seconds() >= min_minutes * 60]
 
 
-def day_end_time(cfg, day=None):
-    eh, em = map(int, (cfg.get("day_end") or "23:30").split(":"))
+def day_end_time(cfg, day=None, shape=None):
+    """When work stops that day: the finish time you gave for it, else the day_end setting."""
+    end = (shape or {}).get("finish") or cfg.get("day_end") or "23:30"
+    try:
+        eh, em = map(int, end.split(":"))
+    except ValueError:
+        eh, em = 23, 30
     day = day or dt.date.today()
     return dt.datetime.combine(day, dt.time(eh, em))
+
+
+def day_shape(doc, tomorrow=False):
+    """The breaks and finish time you gave for the day when you planned it ({} if you weren't asked yet)."""
+    s = doc.get("tomorrow_shape" if tomorrow else "shape")
+    return s if isinstance(s, dict) else {}
+
+
+def break_times(shape, day):
+    """Your longer breaks that day as (start, end), kept free like calendar events."""
+    out = []
+    for b in shape.get("breaks") or []:
+        try:
+            h, m = map(int, str(b.get("start", "")).split(":"))
+            a = dt.datetime.combine(day, dt.time(h, m))
+            out.append((a, a + dt.timedelta(minutes=int(b.get("minutes", 0)))))
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return out
 
 
 def busy_from(items, day):
@@ -143,9 +167,12 @@ def soonest_slot(minutes, skip=None):
     to-dos that already have a time. Returns "HH:MM", or "" if nothing fits today."""
     cfg = load_config()
     today = dt.date.today()
-    busy = [(a, b) for a, b, _ in calendar_events()] + busy_from([t for t in load_todos() if t.get("id") != skip], today)
+    doc = load_doc()
+    shape = day_shape(doc)
+    busy = ([(a, b) for a, b, _ in calendar_events()] + break_times(shape, today)
+            + busy_from([t for t in doc["items"] if t.get("id") != skip], today))
     need = dt.timedelta(minutes=minutes)
-    for a, b in free_windows(busy, dt.datetime.now(), day_end_time(cfg, today), min_minutes=minutes):
+    for a, b in free_windows(busy, dt.datetime.now(), day_end_time(cfg, today, shape), min_minutes=minutes):
         if b - a >= need:
             return f"{a:%H:%M}"
     return ""
@@ -180,12 +207,15 @@ def plan_context(text, day="today"):
     items = doc["tomorrow"] if tomorrow else doc["items"]
     chat = doc.get("chat", [])
     backlog = doc.get("backlog", [])
-    day_end = day_end_time(cfgj, pdate)
+    shape = day_shape(doc, tomorrow)
+    day_end = day_end_time(cfgj, pdate, shape)
     events = calendar_events(1 if tomorrow else 0)
+    breaks = break_times(shape, pdate)
     cal = "\n".join(f"- {a:%H:%M}-{b:%H:%M} {t}" for a, b, t in events) or "none"
+    brk = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in breaks) or "none"
     first_hour = (cfgj.get("active_hours") or [8, 23])[0]
     start_from = dt.datetime.combine(pdate, dt.time(first_hour)) if tomorrow else dt.datetime.now()
-    free = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free_windows([(a, b) for a, b, _ in events], start_from, day_end)) or "none left"
+    free = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free_windows([(a, b) for a, b, _ in events] + breaks, start_from, day_end)) or "none left"
     current = [{"ref": t["id"], "task": t["task"], "minutes": t["minutes"], "start": t.get("start", ""), "done": bool(t.get("done")),
                 "minutes_already_worked": t.get("spent", 0)} for t in items]
     history = "\n".join(f"{m['role']}: {m['text']}" for m in chat[-8:]) if not tomorrow else ""
@@ -223,13 +253,14 @@ How to update:
 - Order unfinished items by urgency (hard deadlines first), then importance; make the first one easy to start.
 - "why": at most 8 words.
 - SCHEDULE unfinished items: a 24h HH:MM "start", back to back with ~5 min breaks, inside the free windows,
-  never overlapping calendar events{"" if tomorrow else ", never before now"}. Timing they state always wins. If it doesn't
-  fit before {day_end:%H:%M}, start "" and why "doesn't fit".
+  never overlapping calendar events or their breaks{"" if tomorrow else ", never before now"}. Timing they state always wins.
+  They finish work at {day_end:%H:%M}: nothing may run past it. If it doesn't fit, start "" and why "doesn't fit".
 - reply: plain and specific, e.g. "Marked stats homework done and moved everything after 8 PM." No fluff.
 
 Now: {dt.datetime.now():%A %B %d, %H:%M}. Planning {which}. The day ends around {day_end:%H:%M}.
 Calendar that day:
 {cal}
+Their longer breaks (keep free): {brk}
 Free windows: {free}
 {("Notes from their own tools:" + chr(10) + notes + chr(10)) if notes else ""}
 Current plan: {json.dumps(current)}
